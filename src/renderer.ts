@@ -68,6 +68,8 @@ export class SkyRenderer {
   private cardinals: THREE.Group;
   private moonMesh: THREE.Mesh | null = null;
   private planetGroup: THREE.Group | null = null;
+  private milkyWayMesh: THREE.Mesh | null = null;
+  private milkyWayMaterial: THREE.ShaderMaterial | null = null;
   /** Sun altitude at the most recent setSky() call (degrees, refraction-uncorrected). */
   private currentSunAltDeg = -90;
   /** Currently active catalog (defaults to the bright fallback; replaced by setCatalog()). */
@@ -122,8 +124,136 @@ export class SkyRenderer {
 
     this.cardinals = this.buildCardinalMarkers();
     this.scene.add(this.cardinals);
+    this.buildMilkyWay();
 
     window.addEventListener("resize", this.onResize);
+  }
+
+  /**
+   * Build the inside-out sky-sphere mesh that renders the procedural Milky
+   * Way band. The fragment shader does the equatorial-to-galactic rotation
+   * inline so we don't need to pre-bake a texture. Per-fragment density is
+   * computed via the same model as src/galactic.ts milkyWayDensity().
+   *
+   * The mesh is added to the scene once at startup but its sidereal rotation
+   * (equatorial ↔ altaz at the observer's local time) is applied each setSky()
+   * via the mesh.quaternion — keeps the band locked to real sky as time passes.
+   */
+  private buildMilkyWay(): void {
+    const radius = SKY_RADIUS * 0.95; // just inside the star sphere
+    const geom = new THREE.SphereGeometry(radius, 64, 32);
+    // Invert normals so we see the inside of the sphere.
+    geom.scale(-1, 1, 1);
+
+    const mat = new THREE.ShaderMaterial({
+      uniforms: {
+        // Bortle wash: at higher Bortle the MW is hidden by skyglow. Fades to
+        // zero at Bortle ≥ 6 — matching real visibility data.
+        uBortle: { value: 4 },
+        // Twilight fade-out: when the sky is bright, the MW is invisible.
+        // 0 = no twilight (full dark), 1 = daylight.
+        uTwilight: { value: 0 },
+      },
+      depthWrite: false,
+      depthTest: false,
+      side: THREE.BackSide,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      vertexShader: /* glsl */ `
+        varying vec3 vWorldDir;
+        void main() {
+          // Pass the world-space direction so the fragment can compute (RA, Dec).
+          // The mesh is at the origin, so world position = direction × radius.
+          vec4 mv = modelViewMatrix * vec4(position, 1.0);
+          gl_Position = projectionMatrix * mv;
+          vWorldDir = (modelMatrix * vec4(position, 1.0)).xyz;
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        precision highp float;
+        varying vec3 vWorldDir;
+        uniform float uBortle;
+        uniform float uTwilight;
+
+        const float PI = 3.141592653589793;
+        const float DEG = PI / 180.0;
+        const float RAD = 180.0 / PI;
+
+        // Galactic-frame conversion constants (same as src/galactic.ts).
+        const float GNP_RA = 192.85948;
+        const float GNP_DEC = 27.12825;
+        const float L0 = 122.93192;
+
+        // Convert a unit direction (ENU world frame after mesh quaternion lifts
+        // equatorial to local altaz) → equatorial (RA, Dec). The mesh's own
+        // quaternion is the inverse of altaz-from-equatorial, so the direction
+        // we see in the fragment is already equatorial-aligned (RA along +X
+        // through vernal equinox, Dec rising toward +Z).
+        // To keep this self-contained the mesh quaternion handles the rotation;
+        // here the input vWorldDir is presumed equatorial-aligned.
+        vec2 dirToRaDec(vec3 d) {
+          d = normalize(d);
+          float dec = asin(clamp(d.z, -1.0, 1.0)) * RAD;
+          float ra = atan(d.y, d.x) * RAD;
+          if (ra < 0.0) ra += 360.0;
+          return vec2(ra, dec);
+        }
+
+        vec2 raDecToGalactic(float raDeg, float decDeg) {
+          float ra = raDeg * DEG;
+          float dec = decDeg * DEG;
+          float raN = GNP_RA * DEG;
+          float decN = GNP_DEC * DEG;
+          float sinB = sin(dec) * sin(decN) + cos(dec) * cos(decN) * cos(ra - raN);
+          float b = asin(clamp(sinB, -1.0, 1.0));
+          float y = cos(dec) * sin(ra - raN);
+          float x = sin(dec) * cos(decN) - cos(dec) * sin(decN) * cos(ra - raN);
+          float l = L0 - atan(y, x) * RAD;
+          l = mod(l, 360.0);
+          if (l < 0.0) l += 360.0;
+          return vec2(l, b * RAD);
+        }
+
+        float mwDensity(float lDeg, float bDeg) {
+          float l = mod(lDeg + 180.0, 360.0) - 180.0;
+          float b = bDeg;
+          float sech = 1.0 / cosh(b / 4.0);
+          float disc = sech * sech;
+          float lradians = l * DEG;
+          float longBulge = 0.55 + 0.45 * cos(lradians);
+          float cellL = floor(l * 0.5);
+          float cellB = floor(b * 0.5);
+          float h = sin(cellL * 12.9898 + cellB * 78.233) * 43758.5453;
+          float noise = h - floor(h);
+          float mottle = 0.7 + 0.3 * noise;
+          return disc * longBulge * mottle;
+        }
+
+        void main() {
+          vec2 raDec = dirToRaDec(vWorldDir);
+          vec2 lb = raDecToGalactic(raDec.x, raDec.y);
+          float density = mwDensity(lb.x, lb.y);
+
+          // Bortle fade: at Bortle ≥ 6 the MW washes out completely.
+          float bortleFade = clamp(1.0 - (uBortle - 1.0) / 5.0, 0.0, 1.0);
+          // Twilight fade: at twilight > ~0.3 the MW is invisible.
+          float twilightFade = clamp(1.0 - uTwilight * 3.0, 0.0, 1.0);
+
+          float intensity = density * 0.07 * bortleFade * twilightFade;
+          // Slightly warm grey-blue tint — real MW reads cooler than starlight
+          // because of the integrated K-giant + dust extinction balance.
+          vec3 col = vec3(0.55, 0.6, 0.72) * intensity;
+          gl_FragColor = vec4(col, 1.0);
+        }
+      `,
+    });
+
+    const mesh = new THREE.Mesh(geom, mat);
+    // Render before everything else (background).
+    mesh.renderOrder = -10;
+    this.scene.add(mesh);
+    this.milkyWayMesh = mesh;
+    this.milkyWayMaterial = mat;
   }
 
   attachTo(container: HTMLElement): void {
@@ -283,7 +413,45 @@ export class SkyRenderer {
 
     this.updateMoon(observer, date);
     this.updatePlanets(observer, date);
+    this.updateMilkyWay(observer, date, sunAltDeg);
     this.updateSkyBackground();
+  }
+
+  /**
+   * Aim the Milky Way background sphere so its built-in equatorial-frame shader
+   * lines up with the local altaz frame at this observer + time. We compute the
+   * 3x3 rotation matrix whose columns are the world-frame ENU images of the
+   * equatorial basis vectors, then convert to a quaternion.
+   */
+  private updateMilkyWay(
+    observer: Observer,
+    date: Date,
+    sunAltDeg: number,
+  ): void {
+    if (!this.milkyWayMesh || !this.milkyWayMaterial) return;
+
+    // Columns of the rotation matrix = ENU images of (vernal-equinox, +90°-east, NCP).
+    const eqBasis: Array<{ ra: number; dec: number }> = [
+      { ra: 0, dec: 0 }, // +X_eq
+      { ra: 90, dec: 0 }, // +Y_eq
+      { ra: 0, dec: 90 }, // +Z_eq (north celestial pole)
+    ];
+    const cols: THREE.Vector3[] = eqBasis.map((b) => {
+      const aa = equatorialToAltAz({ ra: b.ra, dec: b.dec }, observer, date);
+      const [x, y, z] = altAzToVector(aa.altDeg, aa.azDeg);
+      return new THREE.Vector3(x, y, z);
+    });
+    const mat = new THREE.Matrix4().makeBasis(cols[0]!, cols[1]!, cols[2]!);
+    this.milkyWayMesh.quaternion.setFromRotationMatrix(mat);
+
+    // Uniforms: Bortle fades the MW out under skyglow; twilight likewise.
+    this.milkyWayMaterial.uniforms["uBortle"]!.value = this.state.bortle;
+    // Twilight: same shape as updateSkyBackground (0 at sun ≤ -18°, 1 at sun ≥ 0).
+    let twilight: number;
+    if (sunAltDeg <= -18) twilight = 0;
+    else if (sunAltDeg >= 0) twilight = 1;
+    else twilight = (sunAltDeg + 18) / 18;
+    this.milkyWayMaterial.uniforms["uTwilight"]!.value = twilight;
   }
 
   /** Place the moon on the sky sphere with the current phase / illumination. */
@@ -317,6 +485,12 @@ export class SkyRenderer {
         uPhase: { value: moon.phaseAngleDeg * DEG },
         // Bright-limb position angle — orient the terminator correctly in image plane.
         uLimbAngle: { value: moon.brightLimbAngleDeg * DEG },
+        // Earthshine intensity — Earth's illumination fraction as seen from the
+        // Moon, which is the complement of the Moon's own illuminated fraction.
+        // Brightest near new moon (phase ≈ ±180°), invisible near full.
+        // Scale 0.06 = "very faint glow on the dark side" — matches naked-eye
+        // visual: easily seen during waxing/waning crescent in clear dark sky.
+        uEarthshine: { value: 0.06 * (1 - moon.illumination) },
       },
       vertexShader: /* glsl */ `
         varying vec2 vUv;
@@ -331,22 +505,22 @@ export class SkyRenderer {
         varying vec2 vUv;
         uniform float uPhase;
         uniform float uLimbAngle;
+        uniform float uEarthshine;
         void main() {
           float r = length(vUv);
           if (r > 1.0) discard;
-          // Rotate uv so the bright-limb mid-point lies along +x.
           float cl = cos(uLimbAngle), sl = sin(uLimbAngle);
           vec2 r_uv = vec2(cl * vUv.x + sl * vUv.y, -sl * vUv.x + cl * vUv.y);
-          // The terminator is the great circle at x = cos(phase) on the sphere when
-          // projected onto the disk → the visible-illumination test is r_uv.x > cos(phase).
           float lit = step(cos(uPhase), r_uv.x);
-          // Soft limb: smooth Lambertian fall-off near edge so it doesn't read like a coin.
           float limbSoft = pow(1.0 - r, 0.3);
-          // Earthshine: faint glow on the dark side (~5% of full illumination).
-          float earthshine = (1.0 - lit) * 0.05;
-          // Lunar surface tone — slightly warm gray.
-          vec3 col = vec3(0.95, 0.92, 0.85) * (lit * limbSoft + earthshine);
-          gl_FragColor = vec4(col, lit + earthshine * 0.5);
+          // Earthshine on the dark hemisphere; intensity from JS-side uniform
+          // (driven by 1 − moon-illumination → near-zero at full, ~6 % at new).
+          float earthshine = (1.0 - lit) * uEarthshine;
+          // Lunar surface tone — slightly warm gray; earthshine is a touch bluer
+          // because the light comes from the daytime Earth's blue sky.
+          vec3 litCol = vec3(0.95, 0.92, 0.85) * lit * limbSoft;
+          vec3 darkCol = vec3(0.55, 0.65, 0.78) * earthshine;
+          gl_FragColor = vec4(litCol + darkCol, lit + earthshine * 1.2);
         }
       `,
     });
