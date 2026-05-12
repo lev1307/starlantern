@@ -10,6 +10,8 @@ import { SensorHub } from "./sensors";
 import { SkyRenderer } from "./renderer";
 import { CameraCapture } from "./camera";
 import { PlateSolver } from "./platesolve";
+import { OrientationEKF } from "./ekf";
+import type { Quat } from "./quaternion";
 
 const app = document.getElementById("app");
 if (!app) throw new Error("No #app container found");
@@ -76,6 +78,7 @@ app.innerHTML = `
         <button id="unlock-btn" type="button" disabled>Clear lock</button>
       </div>
       <div class="hud-row"><span class="lbl">Lock</span><span id="lock-status">unlocked</span></div>
+      <div class="hud-row"><span class="lbl">EKF</span><span id="ekf-status">idle</span></div>
     </div>
   </div>
   <div id="overlay" class="overlay">
@@ -155,10 +158,22 @@ const $overlayStart = document.getElementById(
 const $lock = document.getElementById("lock-btn") as HTMLButtonElement;
 const $unlock = document.getElementById("unlock-btn") as HTMLButtonElement;
 const $lockStatus = document.getElementById("lock-status")!;
+const $ekfStatus = document.getElementById("ekf-status")!;
 
 const camera = new CameraCapture();
 const solver = new PlateSolver();
 let lockTimeMs: number | null = null;
+
+// --- Multiplicative EKF -------------------------------------------------
+// Predict: every DeviceMotion sample (rotationRate as body-frame ω).
+// Update:  every DeviceOrientation reading at σ ≈ 5° (compass noisy), and
+//          every plate-solve success at σ ≈ 5e-5 rad (~10 arcsec, astrometry).
+// When ekfActive, the renderer's camera quaternion is overwritten with the
+// EKF's posterior every frame — replacing the static-correction lock.
+const ekf = new OrientationEKF();
+let ekfActive = false;
+let ekfHasAbsolute = false;
+let lastMotionTMs: number | null = null;
 
 $offset.addEventListener("input", () => {
   renderer.state.headingOffsetDeg = parseFloat($offset.value);
@@ -248,6 +263,35 @@ let latestOrientation: { a: number; b: number; g: number } | null = null;
 
 sensors.onOrientation((o) => {
   latestOrientation = { a: o.alphaDeg, b: o.betaDeg, g: o.gammaDeg };
+  // After renderer.setOrientation() runs in the tick loop it stores a body→world
+  // quaternion at renderer.getDeviceQuaternion(). The MEKF accepts it as a noisy
+  // absolute measurement with σ ≈ 5° (compass + tilt drift).
+  if (ekfActive) {
+    const qDev = renderer.getDeviceQuaternion();
+    // Skip the very first identity reading before setOrientation has executed.
+    if (qDev[0] !== 1 || qDev[1] !== 0 || qDev[2] !== 0 || qDev[3] !== 0) {
+      ekf.update(qDev, 0.087); // 5° in rad
+      ekfHasAbsolute = true;
+    }
+  }
+});
+
+sensors.onRotationRate((r) => {
+  if (!ekfActive) return;
+  const dt = lastMotionTMs == null ? 0 : (r.tMs - lastMotionTMs) / 1000;
+  lastMotionTMs = r.tMs;
+  if (dt <= 0 || dt > 0.5) return; // skip absurd gaps
+  // DeviceMotionEventRotationRate fields (deg/s, body frame):
+  //   alpha = rotation around Z (screen-perpendicular)
+  //   beta  = rotation around X (top-to-bottom)
+  //   gamma = rotation around Y (left-to-right)
+  const DEG = Math.PI / 180;
+  const omega: [number, number, number] = [
+    r.betaDps * DEG,
+    r.gammaDps * DEG,
+    r.alphaDps * DEG,
+  ];
+  ekf.predict(omega, dt);
 });
 
 async function start(): Promise<void> {
@@ -257,6 +301,16 @@ async function start(): Promise<void> {
   const orientResult = await sensors.requestOrientationPermission();
   if (orientResult !== "granted") {
     alert("Motion sensor access denied. Use mouse drag on desktop.");
+  }
+
+  // DeviceMotion: provides angular velocity (rotationRate). Used by the EKF
+  // predict step for continuous drift correction between plate-solves.
+  const motionResult = await sensors.requestMotionPermission();
+  if (motionResult === "granted") {
+    ekfActive = true;
+    $ekfStatus.textContent = "active (predict-only until first absolute fix)";
+  } else {
+    $ekfStatus.textContent = "no motion sensor (static-correction lock only)";
   }
 
   // Best-effort location fix. Falls back to a sensible default if denied.
@@ -315,6 +369,14 @@ $lock.addEventListener("click", async () => {
     lockTimeMs = Date.now();
     $lockStatus.textContent = `LOCKED — RA ${result.calibration.ra.toFixed(2)}°, Dec ${result.calibration.dec.toFixed(2)}°`;
     $unlock.disabled = false;
+    // Feed the plate-solve into the EKF as a high-precision absolute update.
+    if (ekfActive) {
+      ekf.update(result.qCameraWorld, 5e-5); // ~10 arcsec stddev
+      ekfHasAbsolute = true;
+      // Switch camera source to EKF — continuous drift correction from here on.
+      renderer.cameraSource = "ekf";
+      $ekfStatus.textContent = "locked (plate-solve fix injected)";
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     $lockStatus.textContent = `failed: ${msg}`;
@@ -327,9 +389,12 @@ $lock.addEventListener("click", async () => {
 
 $unlock.addEventListener("click", () => {
   renderer.clearLock();
+  renderer.cameraSource = "sensor";
+  ekfHasAbsolute = false;
   camera.close();
   lockTimeMs = null;
   $lockStatus.textContent = "unlocked";
+  $ekfStatus.textContent = ekfActive ? "predict-only" : "idle";
   $unlock.disabled = true;
 });
 
@@ -350,11 +415,19 @@ $manual.addEventListener("click", () => {
 // --- Render loop ----------------------------------------------------------
 function tick(): void {
   if (latestOrientation) {
+    // setOrientation always runs so qDevice stays current (used by plate-solve
+    // capture). When cameraSource === 'ekf' it skips the camera.quaternion write.
     renderer.setOrientation(
       latestOrientation.a,
       latestOrientation.b,
       latestOrientation.g,
     );
+  }
+
+  if (renderer.cameraSource === "ekf" && ekfHasAbsolute) {
+    renderer.setCameraQuaternion(ekf.state().q as Quat);
+    const yawSigma = ekf.yawSigmaRad() * (180 / Math.PI);
+    $ekfStatus.textContent = `tracking (yaw σ = ${yawSigma.toFixed(2)}°)`;
   }
 
   const loc = sensors.getLocation();

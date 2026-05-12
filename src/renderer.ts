@@ -20,6 +20,7 @@ import {
   scotopicSaturation,
 } from "./astrophysics";
 import { moonPosition } from "./moon";
+import { allPlanetPositions } from "./planets";
 
 const SKY_RADIUS = 100; // arbitrary — stars on a unit sphere look the same at any radius
 const DEG = Math.PI / 180;
@@ -62,6 +63,7 @@ export class SkyRenderer {
   private starWorldPositions: Float32Array | null = null;
   private cardinals: THREE.Group;
   private moonMesh: THREE.Mesh | null = null;
+  private planetGroup: THREE.Group | null = null;
   state: RendererState = {
     headingOffsetDeg: 0,
     bortle: 4,
@@ -220,6 +222,7 @@ export class SkyRenderer {
     this.scene.add(this.starPoints);
 
     this.updateMoon(observer, date);
+    this.updatePlanets(observer, date);
     this.updateSkyBackground();
   }
 
@@ -297,6 +300,95 @@ export class SkyRenderer {
     this.moonMesh = mesh;
   }
 
+  /**
+   * Place visible naked-eye planets on the sky sphere. Each planet is a small
+   * sprite-style coloured disc sized in screen-pixels by its apparent angular
+   * diameter; with no PSF for the disc itself (the rendered disc is the body's
+   * geometric image, not a star-like glint). Brightness scales with apparent
+   * magnitude via the same Pogson flux as stars.
+   */
+  private updatePlanets(observer: Observer, date: Date): void {
+    if (this.planetGroup) {
+      this.scene.remove(this.planetGroup);
+      this.planetGroup.traverse((obj) => {
+        if (obj instanceof THREE.Mesh) {
+          obj.geometry.dispose();
+          (obj.material as THREE.Material).dispose();
+        }
+      });
+      this.planetGroup = null;
+    }
+
+    const group = new THREE.Group();
+    const planets = allPlanetPositions(date);
+
+    for (const p of planets) {
+      const { altDeg, azDeg } = equatorialToAltAz(
+        { ra: p.raDeg, dec: p.decDeg },
+        observer,
+        date,
+      );
+      if (altDeg < -2) continue; // below horizon — skip
+
+      // Apparent magnitude → flux scalar (Pogson, same as stars), with airmass extinction.
+      const apparentMag = p.mag + extinctionMag(altDeg);
+      const flux = magToFlux(apparentMag) * this.state.exposure;
+
+      // Angular size on the sky sphere: arcseconds → radians → tan → SKY_RADIUS·tan.
+      // Naked-eye disc resolution is ~1', so most planets read as bright points
+      // until you zoom; render at max(disc_radius, point-PSF_radius) so they
+      // don't disappear under the planet shader.
+      const angRad = (p.angularDiameterArcsec / 3600) * DEG;
+      const physRadius = Math.max(0.6, SKY_RADIUS * Math.tan(angRad / 2));
+
+      const geom = new THREE.CircleGeometry(physRadius, 32);
+      const mat = new THREE.ShaderMaterial({
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        uniforms: {
+          uColor: {
+            value: new THREE.Vector3(p.color[0], p.color[1], p.color[2]),
+          },
+          uFlux: { value: flux },
+        },
+        vertexShader: /* glsl */ `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv * 2.0 - vec2(1.0);
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: /* glsl */ `
+          varying vec2 vUv;
+          uniform vec3 uColor;
+          uniform float uFlux;
+          void main() {
+            float r2 = dot(vUv, vUv);
+            if (r2 > 1.0) discard;
+            // Sharper edge than a star PSF — planets are spatially resolved discs.
+            float core = pow(1.0 - r2, 1.5);
+            float halo = 0.25 * exp(-r2 * 4.0);
+            float intensity = clamp(core + halo, 0.0, 1.0);
+            float alpha = intensity * clamp(uFlux, 0.0, 8.0);
+            if (alpha < 0.002) discard;
+            gl_FragColor = vec4(uColor * intensity, alpha);
+          }
+        `,
+      });
+      const mesh = new THREE.Mesh(geom, mat);
+      const [x, y, z] = altAzToVector(altDeg, azDeg);
+      mesh.position.set(x * SKY_RADIUS, y * SKY_RADIUS, z * SKY_RADIUS);
+      mesh.lookAt(0, 0, 0);
+      mesh.userData["name"] = p.name;
+      mesh.userData["mag"] = p.mag;
+      group.add(mesh);
+    }
+
+    this.scene.add(group);
+    this.planetGroup = group;
+  }
+
   private updateSkyBackground(): void {
     // At higher Bortle, the sky is no longer black — paint a faint background tint.
     // Mapping: Bortle 1 → near-black; Bortle 9 → urban orange-brown haze.
@@ -320,6 +412,11 @@ export class SkyRenderer {
   /** Lock correction: applied as `q_camera = qLock · qDevice`. Identity until first plate-solve. */
   private qLock = new THREE.Quaternion();
   private hasLock = false;
+  /**
+   * Where the camera pose comes from. 'sensor' = DeviceOrientation (+ optional lock).
+   * 'ekf' = main.ts injects an absolute quaternion via setCameraQuaternion() each frame.
+   */
+  cameraSource: "sensor" | "ekf" = "sensor";
 
   setOrientation(alphaDeg: number, betaDeg: number, gammaDeg: number): void {
     const alpha = (alphaDeg + this.state.headingOffsetDeg) * DEG;
@@ -346,6 +443,10 @@ export class SkyRenderer {
 
     this.qDevice.copy(q);
 
+    // In 'ekf' mode the camera is driven externally; we only update qDevice so the
+    // EKF can still receive DeviceOrientation as a noisy absolute measurement.
+    if (this.cameraSource === "ekf") return;
+
     if (this.hasLock) {
       // q_camera = qLock · qDevice
       const out = this.qLock.clone().multiply(q);
@@ -353,6 +454,11 @@ export class SkyRenderer {
     } else {
       this.camera.quaternion.copy(q);
     }
+  }
+
+  /** Directly set the camera's world quaternion. Used when cameraSource === 'ekf'. */
+  setCameraQuaternion(q: Quat): void {
+    this.camera.quaternion.set(q[1], q[2], q[3], q[0]);
   }
 
   /** Snapshot the device's current pose at the moment of capture (input to plate-solve). */

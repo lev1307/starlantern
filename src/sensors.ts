@@ -18,6 +18,15 @@ export interface Orientation {
   absolute: boolean;
 }
 
+export interface RotationRate {
+  /** Body-frame angular velocity around device X axis (deg/s). */
+  alphaDps: number;
+  betaDps: number;
+  gammaDps: number;
+  /** Performance.now() at the measurement, ms. */
+  tMs: number;
+}
+
 export interface GeoFix {
   latDeg: number;
   lonDeg: number;
@@ -29,6 +38,11 @@ export interface GeoFix {
 }
 
 type OrientationListener = (o: Orientation) => void;
+type RotationRateListener = (r: RotationRate) => void;
+
+interface IOSDeviceMotionCtor {
+  requestPermission?: () => Promise<"granted" | "denied">;
+}
 
 interface IOSDeviceOrientationCtor {
   requestPermission?: () => Promise<"granted" | "denied">;
@@ -38,6 +52,9 @@ export class SensorHub {
   private orientation: Orientation | null = null;
   private geo: GeoFix | null = null;
   private listeners = new Set<OrientationListener>();
+  private rotationListeners = new Set<RotationRateListener>();
+  private motionBound: ((e: DeviceMotionEvent) => void) | null = null;
+  private latestRotation: RotationRate | null = null;
   private watchId: number | null = null;
   private bound: ((e: DeviceOrientationEvent) => void) | null = null;
   private absoluteListenerActive = false;
@@ -170,6 +187,57 @@ export class SensorHub {
     };
   }
 
+  /**
+   * Request DeviceMotion permission (iOS needs it). On grant, starts streaming
+   * rotationRate events. On Android / desktop it's auto-granted.
+   */
+  async requestMotionPermission(): Promise<"granted" | "denied"> {
+    if (typeof window === "undefined" || !("DeviceMotionEvent" in window))
+      return "denied";
+    const ctor = (
+      window as unknown as { DeviceMotionEvent?: IOSDeviceMotionCtor }
+    ).DeviceMotionEvent;
+    if (typeof ctor?.requestPermission === "function") {
+      try {
+        const result = await ctor.requestPermission();
+        if (result === "granted") this.startMotion();
+        return result;
+      } catch {
+        return "denied";
+      }
+    }
+    this.startMotion();
+    return "granted";
+  }
+
+  private startMotion(): void {
+    if (this.motionBound) return;
+    this.motionBound = (e: DeviceMotionEvent) => {
+      const rr = e.rotationRate;
+      if (!rr || rr.alpha == null || rr.beta == null || rr.gamma == null)
+        return;
+      // DeviceMotion's rotationRate is in deg/s in device body frame.
+      const rec: RotationRate = {
+        alphaDps: rr.alpha,
+        betaDps: rr.beta,
+        gammaDps: rr.gamma,
+        tMs: performance.now(),
+      };
+      this.latestRotation = rec;
+      for (const l of this.rotationListeners) l(rec);
+    };
+    window.addEventListener("devicemotion", this.motionBound);
+  }
+
+  onRotationRate(cb: RotationRateListener): () => void {
+    this.rotationListeners.add(cb);
+    return () => this.rotationListeners.delete(cb);
+  }
+
+  getRotationRate(): RotationRate | null {
+    return this.latestRotation;
+  }
+
   dispose(): void {
     if (this.bound) {
       window.removeEventListener("deviceorientation", this.bound);
@@ -181,10 +249,15 @@ export class SensorHub {
       }
       this.bound = null;
     }
+    if (this.motionBound) {
+      window.removeEventListener("devicemotion", this.motionBound);
+      this.motionBound = null;
+    }
     if (this.watchId != null) {
       navigator.geolocation.clearWatch(this.watchId);
       this.watchId = null;
     }
     this.listeners.clear();
+    this.rotationListeners.clear();
   }
 }
