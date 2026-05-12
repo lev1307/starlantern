@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    { "source": "/api/platesolve/:path*", "destination": "/api/platesolve" }
+  ],
+  "functions": {
+    "api/platesolve.ts": { "maxDuration": 30 }
+  }
+}

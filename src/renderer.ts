@@ -11,6 +11,7 @@
 import * as THREE from "three";
 import { altAzToVector, equatorialToAltAz, type Observer } from "./coords";
 import { BRIGHT_STARS } from "./catalog";
+import type { Quat } from "./quaternion";
 
 const SKY_RADIUS = 100; // arbitrary — stars on a unit sphere look the same at any radius
 const DEG = Math.PI / 180;
@@ -142,6 +143,12 @@ export class SkyRenderer {
    * "phone held vertically, screen facing user, top of phone up" looks at the horizon.
    * headingOffsetDeg adds to alpha to correct magnetometer drift.
    */
+  /** Pre-correction "device-pose" quaternion (set by setOrientation, used for plate-solve). */
+  private qDevice = new THREE.Quaternion();
+  /** Lock correction: applied as `q_camera = qLock · qDevice`. Identity until first plate-solve. */
+  private qLock = new THREE.Quaternion();
+  private hasLock = false;
+
   setOrientation(alphaDeg: number, betaDeg: number, gammaDeg: number): void {
     const alpha = (alphaDeg + this.state.headingOffsetDeg) * DEG;
     const beta = betaDeg * DEG;
@@ -165,7 +172,53 @@ export class SkyRenderer {
     );
     q.multiply(mirror);
 
-    this.camera.quaternion.copy(q);
+    this.qDevice.copy(q);
+
+    if (this.hasLock) {
+      // q_camera = qLock · qDevice
+      const out = this.qLock.clone().multiply(q);
+      this.camera.quaternion.copy(out);
+    } else {
+      this.camera.quaternion.copy(q);
+    }
+  }
+
+  /** Snapshot the device's current pose at the moment of capture (input to plate-solve). */
+  getDeviceQuaternion(): Quat {
+    const q = this.qDevice;
+    return [q.w, q.x, q.y, q.z];
+  }
+
+  /**
+   * Install a static lock correction so that future device readings render as if
+   * the camera were truly at `qWorldAtCapture` when the device was at `qDeviceAtCapture`.
+   * qLock = qWorldAtCapture · qDeviceAtCapture⁻¹.
+   */
+  applyLock(qWorldAtCapture: Quat, qDeviceAtCapture: Quat): void {
+    const qWorld = new THREE.Quaternion(
+      qWorldAtCapture[1],
+      qWorldAtCapture[2],
+      qWorldAtCapture[3],
+      qWorldAtCapture[0],
+    );
+    const qDev = new THREE.Quaternion(
+      qDeviceAtCapture[1],
+      qDeviceAtCapture[2],
+      qDeviceAtCapture[3],
+      qDeviceAtCapture[0],
+    ).invert();
+    this.qLock.multiplyQuaternions(qWorld, qDev);
+    this.hasLock = true;
+  }
+
+  /** True once a successful plate-solve has been applied. */
+  get locked(): boolean {
+    return this.hasLock;
+  }
+
+  clearLock(): void {
+    this.qLock.identity();
+    this.hasLock = false;
   }
 
   /** Desktop fallback: drag-look. Returns a cleanup function. */
