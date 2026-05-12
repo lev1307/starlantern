@@ -12,6 +12,7 @@ import { CameraCapture } from "./camera";
 import { PlateSolver } from "./platesolve";
 import { OrientationEKF } from "./ekf";
 import type { Quat } from "./quaternion";
+import { loadStarCatalog } from "./catalog";
 
 const app = document.getElementById("app");
 if (!app) throw new Error("No #app container found");
@@ -190,6 +191,23 @@ function refreshSky(): void {
   if (fix)
     renderer.setSky({ latDeg: fix.latDeg, lonDeg: fix.lonDeg }, new Date());
 }
+
+// Kick off the full HYG (~8920 stars, mag ≤ 6.5) catalog load. Until the
+// fetch resolves, the renderer keeps using the embedded BRIGHT_STARS fallback,
+// so something is always painted from the very first frame.
+void (async () => {
+  try {
+    const full = await loadStarCatalog();
+    renderer.setCatalog(full);
+    refreshSky();
+    console.info(`[ar-night-sky] loaded ${full.length}-star catalog`);
+  } catch (err) {
+    console.warn(
+      "[ar-night-sky] full catalog failed, using bright fallback",
+      err,
+    );
+  }
+})();
 
 $bortle.addEventListener("input", () => {
   renderer.state.bortle = parseFloat($bortle.value);

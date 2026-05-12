@@ -9,6 +9,11 @@ import {
   bortleSkyMag,
   bortleLimitMag,
   scotopicSaturation,
+  refractionDeg,
+  scintillationAmplitude,
+  twilightSkyMag,
+  skyMagToLimitMag,
+  effectiveLimitMag,
 } from "../src/astrophysics";
 
 describe("bvToTeff (Ballesteros 2012 fit)", () => {
@@ -131,5 +136,120 @@ describe("scotopicSaturation", () => {
   it("monotonically increases with flux", () => {
     expect(scotopicSaturation(0.01)).toBeLessThan(scotopicSaturation(0.1));
     expect(scotopicSaturation(0.1)).toBeLessThan(scotopicSaturation(1));
+  });
+});
+
+describe("refractionDeg (Bennett 1982)", () => {
+  it("zenith refraction is essentially zero", () => {
+    expect(refractionDeg(90)).toBeLessThan(0.001);
+  });
+
+  it("horizon refraction is about 0.55° (≈ 34 arcmin) — slightly more than a Sun-diameter lift", () => {
+    const R = refractionDeg(0);
+    expect(R).toBeGreaterThan(0.4);
+    expect(R).toBeLessThan(0.7);
+  });
+
+  it("decreases monotonically with altitude over [0, 90°]", () => {
+    let prev = refractionDeg(0);
+    for (const h of [1, 5, 10, 30, 60, 89]) {
+      const r = refractionDeg(h);
+      expect(r).toBeLessThanOrEqual(prev + 1e-9);
+      prev = r;
+    }
+  });
+
+  it("returns 0 well below horizon", () => {
+    expect(refractionDeg(-5)).toBe(0);
+  });
+});
+
+describe("scintillationAmplitude", () => {
+  it("zero below horizon", () => {
+    expect(scintillationAmplitude(-1)).toBe(0);
+    expect(scintillationAmplitude(0)).toBe(0);
+  });
+
+  it("zenith twinkle is tiny (~0.5%)", () => {
+    const z = scintillationAmplitude(90);
+    expect(z).toBeGreaterThan(0.003);
+    expect(z).toBeLessThan(0.01);
+  });
+
+  it("low-altitude twinkle is much larger than zenith", () => {
+    expect(scintillationAmplitude(10)).toBeGreaterThan(
+      5 * scintillationAmplitude(80),
+    );
+  });
+
+  it("monotonic: less altitude → more twinkle", () => {
+    let prev = 0;
+    for (const h of [89, 60, 30, 10, 5, 2]) {
+      const a = scintillationAmplitude(h);
+      expect(a).toBeGreaterThan(prev);
+      prev = a;
+    }
+  });
+
+  it("clamps at 0.35 even at extremely low altitudes", () => {
+    expect(scintillationAmplitude(0.1)).toBeLessThanOrEqual(0.35 + 1e-9);
+  });
+});
+
+describe("twilightSkyMag", () => {
+  it("dark sky floor: sun below -18° → 22.0 mag/arcsec²", () => {
+    expect(twilightSkyMag(-30)).toBeCloseTo(22, 3);
+    expect(twilightSkyMag(-18)).toBeCloseTo(22, 3);
+  });
+
+  it("daylight: sun above horizon → 5 mag/arcsec²", () => {
+    expect(twilightSkyMag(0)).toBeCloseTo(5, 3);
+    expect(twilightSkyMag(30)).toBeCloseTo(5, 3);
+  });
+
+  it("monotonically brighter (lower mag) as the sun rises through twilight", () => {
+    let prev = twilightSkyMag(-18);
+    for (const h of [-15, -12, -9, -6, -3, -1]) {
+      const v = twilightSkyMag(h);
+      expect(v).toBeLessThan(prev + 1e-6);
+      prev = v;
+    }
+  });
+
+  it("nautical / civil anchors are physically plausible", () => {
+    expect(twilightSkyMag(-12)).toBeCloseTo(18.5, 1);
+    expect(twilightSkyMag(-6)).toBeCloseTo(12.5, 1);
+  });
+});
+
+describe("skyMagToLimitMag", () => {
+  it("dark sky → mag 7.8 limit", () => {
+    expect(skyMagToLimitMag(22)).toBeCloseTo(7.8, 1);
+  });
+
+  it("Bortle-9 city sky → mag ~4 limit", () => {
+    expect(skyMagToLimitMag(18)).toBeCloseTo(4.0, 1);
+  });
+
+  it("daylight returns -∞ (no stars visible)", () => {
+    expect(skyMagToLimitMag(5)).toBe(-Infinity);
+  });
+});
+
+describe("effectiveLimitMag", () => {
+  it("dark night, dark site → ~7.8", () => {
+    expect(effectiveLimitMag(1, -30)).toBeGreaterThan(7.5);
+  });
+
+  it("city sky, dark night → Bortle-limited (~4)", () => {
+    expect(effectiveLimitMag(9, -30)).toBeCloseTo(4.0, 1);
+  });
+
+  it("twilight clamps the limit even at a dark site", () => {
+    expect(effectiveLimitMag(1, -6)).toBeLessThan(2); // civil twilight wipes out faint stars
+  });
+
+  it("daylight → very negative (effectively nothing visible)", () => {
+    expect(effectiveLimitMag(1, 30)).toBeLessThan(0);
   });
 });

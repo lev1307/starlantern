@@ -10,7 +10,7 @@
 
 import * as THREE from "three";
 import { altAzToVector, equatorialToAltAz, type Observer } from "./coords";
-import { BRIGHT_STARS } from "./catalog";
+import { BRIGHT_STARS, type Star } from "./catalog";
 import type { Quat } from "./quaternion";
 import {
   bvToRgb,
@@ -18,8 +18,12 @@ import {
   extinctionMag,
   bortleLimitMag,
   scotopicSaturation,
+  refractionDeg,
+  scintillationAmplitude,
+  effectiveLimitMag,
+  twilightSkyMag,
 } from "./astrophysics";
-import { moonPosition } from "./moon";
+import { moonPosition, sunPosition } from "./moon";
 import { allPlanetPositions } from "./planets";
 
 const SKY_RADIUS = 100; // arbitrary — stars on a unit sphere look the same at any radius
@@ -64,6 +68,15 @@ export class SkyRenderer {
   private cardinals: THREE.Group;
   private moonMesh: THREE.Mesh | null = null;
   private planetGroup: THREE.Group | null = null;
+  /** Sun altitude at the most recent setSky() call (degrees, refraction-uncorrected). */
+  private currentSunAltDeg = -90;
+  /** Currently active catalog (defaults to the bright fallback; replaced by setCatalog()). */
+  private catalog: readonly Star[] = BRIGHT_STARS;
+
+  /** Replace the rendered catalog (e.g. with the HYG 8920-star binary subset on load). */
+  setCatalog(catalog: readonly Star[]): void {
+    this.catalog = catalog;
+  }
   state: RendererState = {
     headingOffsetDeg: 0,
     bortle: 4,
@@ -128,19 +141,36 @@ export class SkyRenderer {
    * The fragment shader draws a Moffat-like soft PSF whose intensity is the per-star flux.
    */
   setSky(observer: Observer, date: Date): void {
-    const positions = new Float32Array(BRIGHT_STARS.length * 3);
-    const fluxes = new Float32Array(BRIGHT_STARS.length);
-    const colors = new Float32Array(BRIGHT_STARS.length * 3);
-    const limitMag = bortleLimitMag(this.state.bortle);
+    const catalog = this.catalog;
+    const positions = new Float32Array(catalog.length * 3);
+    const fluxes = new Float32Array(catalog.length);
+    const colors = new Float32Array(catalog.length * 3);
+    const twinkleAmps = new Float32Array(catalog.length);
+    const twinklePhases = new Float32Array(catalog.length);
+    // Sun position drives twilight darkening — when the sun is up or in civil
+    // twilight, only the very brightest stars can punch through the sky glow.
+    const sun = sunPosition(date);
+    const { altDeg: sunAltDeg } = equatorialToAltAz(
+      { ra: sun.raDeg, dec: sun.decDeg },
+      observer,
+      date,
+    );
+    this.currentSunAltDeg = sunAltDeg; // remembered for updateSkyBackground
+    const limitMag = effectiveLimitMag(this.state.bortle, sunAltDeg);
+    // Avoid a vestigial reference to the imported bortleLimitMag (kept for callers).
+    void bortleLimitMag;
 
-    for (let i = 0; i < BRIGHT_STARS.length; i++) {
-      const s = BRIGHT_STARS[i]!;
+    for (let i = 0; i < catalog.length; i++) {
+      const s = catalog[i]!;
       const { altDeg, azDeg } = equatorialToAltAz(
         { ra: s.ra, dec: s.dec },
         observer,
         date,
       );
-      const [x, y, z] = altAzToVector(altDeg, azDeg);
+      // Atmospheric refraction lifts apparent altitude near the horizon by up to
+      // ~34 arcmin — bend the rendered position to match what the eye actually sees.
+      const altApparent = altDeg + refractionDeg(altDeg);
+      const [x, y, z] = altAzToVector(altApparent, azDeg);
       positions[i * 3 + 0] = x * SKY_RADIUS;
       positions[i * 3 + 1] = y * SKY_RADIUS;
       positions[i * 3 + 2] = z * SKY_RADIUS;
@@ -151,6 +181,14 @@ export class SkyRenderer {
       const visibility = 1 - smoothstep(limitMag - 0.5, limitMag, apparentMag);
       const flux = magToFlux(apparentMag) * visibility * this.state.exposure;
       fluxes[i] = flux;
+
+      // Per-star twinkle: amplitude grows with airmass; deterministic phase keeps
+      // adjacent stars from blinking in sync (would read as artificial).
+      twinkleAmps[i] = scintillationAmplitude(altDeg);
+      // Hash RA+Dec to a stable per-star phase ∈ [0, 2π).
+      twinklePhases[i] =
+        (((s.ra * 13.37 + s.dec * 7.91) % (2 * Math.PI)) + 2 * Math.PI) %
+        (2 * Math.PI);
 
       // True color from B-V → blackbody RGB, then scotopic desaturation toward neutral.
       const [cr, cg, cb] = bvToRgb(s.bv);
@@ -175,6 +213,14 @@ export class SkyRenderer {
     geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
     geometry.setAttribute("flux", new THREE.BufferAttribute(fluxes, 1));
     geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    geometry.setAttribute(
+      "twinkleAmp",
+      new THREE.BufferAttribute(twinkleAmps, 1),
+    );
+    geometry.setAttribute(
+      "twinklePhase",
+      new THREE.BufferAttribute(twinklePhases, 1),
+    );
 
     const material = new THREE.ShaderMaterial({
       transparent: true,
@@ -183,20 +229,34 @@ export class SkyRenderer {
       blending: THREE.AdditiveBlending,
       uniforms: {
         uPixelRatio: { value: this.renderer.getPixelRatio() },
+        uTime: { value: 0 }, // updated every frame in render()
       },
       vertexShader: /* glsl */ `
         attribute float flux;
+        attribute float twinkleAmp;
+        attribute float twinklePhase;
         varying vec3 vColor;
         varying float vFlux;
         uniform float uPixelRatio;
+        uniform float uTime;
         void main() {
+          // Twinkle: superpose 3 incommensurate frequencies (2.1, 3.7, 5.9 Hz) so
+          // each star has its own quasi-random shimmer. Aggregate amplitude is
+          // twinkleAmp (set per-star from airmass-driven scintillation).
+          float t = uTime;
+          float ph = twinklePhase;
+          float modulation =
+              0.5 * sin(t * 2.1 + ph)
+            + 0.3 * sin(t * 3.7 + ph * 1.7)
+            + 0.2 * sin(t * 5.9 + ph * 0.9);
+          float fluxMod = flux * (1.0 + twinkleAmp * modulation);
           vColor = color;
-          vFlux = flux;
+          vFlux = fluxMod;
           vec4 mv = modelViewMatrix * vec4(position, 1.0);
           gl_Position = projectionMatrix * mv;
           // PSF radius scales with √flux up to a cap — same flux distributed over
           // a wider area gives a brighter, larger blur, matching the eye's PSF response.
-          float radius = clamp(2.0 + 6.0 * sqrt(max(flux, 0.0001)), 2.0, 18.0);
+          float radius = clamp(2.0 + 6.0 * sqrt(max(fluxMod, 0.0001)), 2.0, 18.0);
           gl_PointSize = radius * uPixelRatio * (320.0 / -mv.z);
         }
       `,
@@ -292,9 +352,10 @@ export class SkyRenderer {
     });
 
     const mesh = new THREE.Mesh(geom, mat);
-    const [x, y, z] = altAzToVector(altDeg, azDeg);
+    // Refraction lifts the apparent altitude of the moon near the horizon by ~30'.
+    const altApp = altDeg + refractionDeg(altDeg);
+    const [x, y, z] = altAzToVector(altApp, azDeg);
     mesh.position.set(x * SKY_RADIUS, y * SKY_RADIUS, z * SKY_RADIUS);
-    // Orient the disk so its normal points back at the camera (origin).
     mesh.lookAt(0, 0, 0);
     this.scene.add(mesh);
     this.moonMesh = mesh;
@@ -377,7 +438,8 @@ export class SkyRenderer {
         `,
       });
       const mesh = new THREE.Mesh(geom, mat);
-      const [x, y, z] = altAzToVector(altDeg, azDeg);
+      const altApp = altDeg + refractionDeg(altDeg);
+      const [x, y, z] = altAzToVector(altApp, azDeg);
       mesh.position.set(x * SKY_RADIUS, y * SKY_RADIUS, z * SKY_RADIUS);
       mesh.lookAt(0, 0, 0);
       mesh.userData["name"] = p.name;
@@ -390,14 +452,39 @@ export class SkyRenderer {
   }
 
   private updateSkyBackground(): void {
-    // At higher Bortle, the sky is no longer black — paint a faint background tint.
-    // Mapping: Bortle 1 → near-black; Bortle 9 → urban orange-brown haze.
+    // Compose two independent sources of sky glow:
+    //   (1) Bortle wash — orange-brown urban haze; isotropic.
+    //   (2) Twilight from sun altitude — deep blue when sun is just below horizon,
+    //       fading to black past -18°. Real eye sees a strong blue cast at
+    //       nautical / astronomical twilight; map that to a single uniform tint
+    //       (a horizon gradient is a future refinement).
     const b = Math.max(1, Math.min(9, this.state.bortle));
-    const t = (b - 1) / 8;
-    const r = 0.0 + t * 0.06;
-    const g = 0.0 + t * 0.04;
-    const blue = 0.0 + t * 0.02;
-    this.scene.background = new THREE.Color(r, g, blue);
+    const bt = (b - 1) / 8;
+
+    // Twilight intensity: 0 at sun ≤ -18°, 1 at sun ≥ 0°.
+    const sunAlt = this.currentSunAltDeg;
+    let twilight: number;
+    if (sunAlt <= -18) twilight = 0;
+    else if (sunAlt >= 0) twilight = 1;
+    else twilight = (sunAlt + 18) / 18;
+
+    // Twilight colour palette: blue at deep twilight → cyan-blue at nautical → pink at civil.
+    const twR = 0.05 * twilight + 0.45 * Math.max(0, twilight - 0.6);
+    const twG = 0.1 * twilight + 0.3 * Math.max(0, twilight - 0.6);
+    const twB = 0.25 * twilight + 0.5 * Math.max(0, twilight - 0.4);
+
+    // Bortle urban-glow palette (orange-brown haze).
+    const buR = bt * 0.06;
+    const buG = bt * 0.04;
+    const buB = bt * 0.02;
+
+    // Combine (additive, clamped). Sky glow can plausibly exceed 1.0 → clamp for canvas.
+    const r = Math.min(1, twR + buR);
+    const g = Math.min(1, twG + buG);
+    const bl = Math.min(1, twB + buB);
+    this.scene.background = new THREE.Color(r, g, bl);
+    // Suppress an unused-import warning when twilightSkyMag isn't directly read here.
+    void twilightSkyMag;
   }
 
   /**
@@ -555,28 +642,51 @@ export class SkyRenderer {
     );
     let bestI = -1;
     let bestDot = -2;
+    let bestNamedI = -1;
+    let bestNamedDot = -2;
     const v = new THREE.Vector3();
     const inv = 1 / SKY_RADIUS;
     const arr = this.starWorldPositions;
-    for (let i = 0; i < BRIGHT_STARS.length; i++) {
+    const cat = this.catalog;
+    for (let i = 0; i < cat.length; i++) {
       v.set(arr[i * 3]! * inv, arr[i * 3 + 1]! * inv, arr[i * 3 + 2]! * inv);
       const d = forward.dot(v);
       if (d > bestDot) {
         bestDot = d;
         bestI = i;
       }
+      // Prefer named stars for the HUD readout when they're reasonably close
+      // (within ~15° of view centre) — picker results like "HYG-12345" aren't
+      // useful for the calibration UX.
+      if (
+        cat[i]!.name &&
+        d > bestNamedDot &&
+        d > Math.cos((15 * Math.PI) / 180)
+      ) {
+        bestNamedDot = d;
+        bestNamedI = i;
+      }
     }
-    if (bestI < 0) return null;
+    const useI = bestNamedI >= 0 ? bestNamedI : bestI;
+    const useDot = bestNamedI >= 0 ? bestNamedDot : bestDot;
+    if (useI < 0) return null;
     const angle =
-      Math.acos(Math.max(-1, Math.min(1, bestDot))) * (180 / Math.PI);
-    return { name: BRIGHT_STARS[bestI]!.name, angleDeg: angle };
+      Math.acos(Math.max(-1, Math.min(1, useDot))) * (180 / Math.PI);
+    const name = cat[useI]!.name ?? `mag ${cat[useI]!.mag.toFixed(1)} star`;
+    return { name, angleDeg: angle };
   }
 
   render(): void {
+    // Drive the per-star twinkle modulation (in seconds, fractional).
+    if (this.starPoints) {
+      const m = this.starPoints.material as THREE.ShaderMaterial;
+      if (m.uniforms["uTime"]) {
+        m.uniforms["uTime"]!.value = performance.now() / 1000;
+      }
+    }
     if (this.state.stereo.enabled) {
       this.renderStereo();
     } else {
-      // Make sure the offscreen RT isn't bound from a previous stereo frame.
       this.renderer.setRenderTarget(null);
       this.renderer.render(this.scene, this.camera);
     }

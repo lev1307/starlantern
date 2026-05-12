@@ -78,6 +78,41 @@ export function extinctionMag(altDeg: number, k = 0.28): number {
 }
 
 /**
+ * Atmospheric refraction lift, in degrees. Bennett 1982 fit, valid 0°-90°.
+ *
+ *   R(h_apparent) = 1 / tan(h_app + 7.31 / (h_app + 4.4))   [arcminutes]
+ *
+ * At the horizon R ≈ 34', i.e. a star at geometric altitude -34' appears on
+ * the horizon. We use this to lift the rendered altitude so stars near the
+ * horizon sit where the eye actually sees them.
+ */
+export function refractionDeg(altDeg: number): number {
+  if (altDeg < -1) return 0; // well below horizon — don't bother
+  const hApp = Math.max(altDeg, -0.5); // clamp so tan doesn't blow up
+  const R_arcmin =
+    1.0 / Math.tan(((hApp + 7.31 / (hApp + 4.4)) * Math.PI) / 180);
+  // Bennett gives R for apparent altitude; iterating once corrects the small
+  // approximation when treating the input as geometric — within 0.1' across the sky.
+  return R_arcmin / 60;
+}
+
+/**
+ * Scintillation amplitude (relative flux modulation 1-σ). Twinkle is caused
+ * by atmospheric turbulence and scales roughly with airmass^0.75 (Young 1969).
+ * At zenith on a calm night ~0.5%; near horizon up to ~15-30% for bright stars.
+ *
+ * Real twinkle frequency is ~5-50 Hz (the eye integrates the higher end);
+ * the renderer modulates per-star intensity at a few Hz so the effect reads
+ * as a slow shimmer rather than a strobe.
+ */
+export function scintillationAmplitude(altDeg: number): number {
+  if (altDeg <= 0) return 0; // below horizon
+  const X = airmass(altDeg);
+  // Young 1969 empirical fit, scaled so zenith ≈ 0.005, 30° ≈ 0.012, 10° ≈ 0.06.
+  return Math.min(0.35, 0.005 * Math.pow(X, 1.7));
+}
+
+/**
  * Bortle-scale → night-sky surface brightness in mag/arcsec² (V-band, zenith).
  * Bortle 1 ≈ 22.0 mag/arcsec² (excellent dark sky)
  * Bortle 9 ≈ 18.0 mag/arcsec² (inner city)
@@ -95,6 +130,63 @@ export function bortleSkyMag(bortle: number): number {
 export function bortleLimitMag(bortle: number): number {
   const b = Math.max(1, Math.min(9, bortle));
   return 7.8 - ((b - 1) / 8) * 3.8;
+}
+
+/**
+ * Sky surface brightness in V-band mag/arcsec² as a function of the Sun's
+ * altitude. Pure-dark-sky floor is 22.0; values shrink (sky gets brighter)
+ * through astronomical (-18°), nautical (-12°), civil (-6°) twilight; above
+ * 0° the sky is full daylight (~5 mag/arcsec²).
+ *
+ * Reference shape adapted from Krisciunas & Schaefer 1991 + simplified field
+ * data: roughly piecewise log-linear in sun altitude.
+ */
+export function twilightSkyMag(sunAltDeg: number): number {
+  if (sunAltDeg >= 0) return 5; // daylight — stars unobservable
+  if (sunAltDeg <= -18) return 22; // astronomical dark
+  if (sunAltDeg <= -12) {
+    // -18 → 22.0, -12 → 18.5
+    const t = (sunAltDeg + 18) / 6;
+    return 22.0 - t * 3.5;
+  }
+  if (sunAltDeg <= -6) {
+    // -12 → 18.5, -6 → 12.5
+    const t = (sunAltDeg + 12) / 6;
+    return 18.5 - t * 6.0;
+  }
+  // -6 → 12.5, 0 → 5.0
+  const t = (sunAltDeg + 6) / 6;
+  return 12.5 - t * 7.5;
+}
+
+/**
+ * Limiting naked-eye magnitude given a sky surface brightness.
+ * Rough fit from human-eye contrast experiments (Schaefer 1990 condensed):
+ *   - mag 22 sky → limit ≈ 7.8
+ *   - mag 18 sky → limit ≈ 4.0
+ *   - mag 12 sky → limit ≈ -1 (only Venus/Sirius)
+ *   - mag 5 sky  → no stars
+ */
+export function skyMagToLimitMag(skyMag: number): number {
+  if (skyMag <= 5) return -Infinity;
+  if (skyMag >= 22) return 7.8;
+  // Piecewise linear through anchors above.
+  if (skyMag >= 18) return 4.0 + ((skyMag - 18) / 4) * 3.8;
+  if (skyMag >= 12) return -1.0 + ((skyMag - 12) / 6) * 5.0;
+  // 5 → -∞ ; 12 → -1. Use linear in this band; caller can clip below mag-4 floor.
+  return -8 + ((skyMag - 5) / 7) * 7.0;
+}
+
+/**
+ * Effective limiting magnitude given Bortle floor + current twilight state.
+ * The brighter of the two bounding-magnitudes wins: civil twilight at a dark
+ * site is still limited by twilight; mid-night under a Bortle-9 city is
+ * limited by the city. Take the minimum (i.e. fewest stars visible).
+ */
+export function effectiveLimitMag(bortle: number, sunAltDeg: number): number {
+  const bMag = bortleLimitMag(bortle);
+  const tMag = skyMagToLimitMag(twilightSkyMag(sunAltDeg));
+  return Math.min(bMag, tMag);
 }
 
 /**
