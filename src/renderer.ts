@@ -70,6 +70,7 @@ export class SkyRenderer {
   private planetGroup: THREE.Group | null = null;
   private milkyWayMesh: THREE.Mesh | null = null;
   private milkyWayMaterial: THREE.ShaderMaterial | null = null;
+  private moonGlowMaterial: THREE.ShaderMaterial | null = null;
   /** Sun altitude at the most recent setSky() call (degrees, refraction-uncorrected). */
   private currentSunAltDeg = -90;
   /** Currently active catalog (defaults to the bright fallback; replaced by setCatalog()). */
@@ -125,6 +126,7 @@ export class SkyRenderer {
     this.cardinals = this.buildCardinalMarkers();
     this.scene.add(this.cardinals);
     this.buildMilkyWay();
+    this.buildMoonGlow();
 
     window.addEventListener("resize", this.onResize);
   }
@@ -256,6 +258,111 @@ export class SkyRenderer {
     this.milkyWayMaterial = mat;
   }
 
+  /**
+   * Build the moon-glow sphere. A bright moon scatters Rayleigh-blue light
+   * through the atmosphere, brightening the sky around it (and globally) by
+   * 1-4 magnitudes — enough to wash out the Milky Way and faint stars.
+   * Krisciunas & Schaefer 1991 gives a quantitative model; we use a simplified
+   * geometry-only approximation that's good enough for naked-eye perception:
+   *
+   *   intensity(d) = illum · airmass-factor(moon) · scatter(angle(d, moon))
+   *
+   * with `scatter` = (0.4 + 0.6·cos) broad Rayleigh + a forward-scattering halo
+   * exp(50·(cos − 1)) right around the moon disc. Additive blended on top of
+   * the sky background.
+   */
+  private buildMoonGlow(): void {
+    const radius = SKY_RADIUS * 0.96;
+    const geom = new THREE.SphereGeometry(radius, 48, 24);
+    geom.scale(-1, 1, 1);
+
+    const mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uMoonDir: { value: new THREE.Vector3(0, -1, 0) },
+        uIllum: { value: 0 },
+        uMoonAlt: { value: -1 },
+        uSunDir: { value: new THREE.Vector3(0, -1, 0) },
+        uTwilight: { value: 0 },
+        uBortle: { value: 4 },
+      },
+      depthWrite: false,
+      depthTest: false,
+      side: THREE.BackSide,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      vertexShader: /* glsl */ `
+        varying vec3 vWorldDir;
+        void main() {
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          vWorldDir = (modelMatrix * vec4(position, 1.0)).xyz;
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        precision highp float;
+        varying vec3 vWorldDir;
+        uniform vec3 uMoonDir;
+        uniform float uIllum;
+        uniform float uMoonAlt;
+        uniform vec3 uSunDir;
+        uniform float uTwilight;
+        uniform float uBortle;
+
+        void main() {
+          vec3 d = normalize(vWorldDir);
+          float altSin = d.y; // sin(altitude) in world frame (Y up)
+
+          vec3 total = vec3(0.0);
+
+          // -- Moon-scattered light --------------------------------------------
+          if (uIllum > 0.001 && uMoonAlt > -0.05) {
+            float cm = clamp(dot(d, normalize(uMoonDir)), -1.0, 1.0);
+            float rayleighM = max(0.4 + 0.6 * cm, 0.0);
+            float forwardM = exp((cm - 1.0) * 50.0);
+            float scatterM = rayleighM + 0.8 * forwardM;
+            float moonFactor = clamp(uMoonAlt + 0.1, 0.0, 1.0);
+            float upFactorM = 1.0 - 0.4 * max(altSin, 0.0);
+            float iM = uIllum * moonFactor * scatterM * upFactorM * 0.06;
+            total += vec3(0.55, 0.6, 0.78) * iM;
+          }
+
+          // -- Twilight (sun-direction-aware) ----------------------------------
+          if (uTwilight > 0.01) {
+            float cs = clamp(dot(d, normalize(uSunDir)), -1.0, 1.0);
+            // Anti-solar side stays darker even during civil twilight.
+            float scatterS = 0.35 + 0.65 * max(cs, 0.0);
+            // Twilight always glows brightest toward the horizon — sky is darker overhead.
+            float horizonGain = 1.2 - 0.6 * clamp(altSin, 0.0, 1.0);
+            float iS = uTwilight * scatterS * horizonGain * 0.7;
+            // Twilight palette: deep blue → cyan → pink as sun rises.
+            vec3 twCol = mix(
+              vec3(0.05, 0.10, 0.30),      // astronomical twilight
+              vec3(0.70, 0.40, 0.45),      // civil twilight horizon
+              clamp(uTwilight - 0.4, 0.0, 0.6) / 0.6
+            );
+            total += twCol * iS;
+          }
+
+          // -- Light pollution horizon dome (altitude-dependent only) ----------
+          float bortleNorm = clamp((uBortle - 1.0) / 8.0, 0.0, 1.0);
+          if (bortleNorm > 0.0 && altSin > -0.05) {
+            // Dome that's strong near the horizon and fades quickly with altitude.
+            float horizonProx = pow(1.0 - clamp(altSin, 0.0, 1.0), 3.0);
+            float iLP = bortleNorm * horizonProx * 0.4;
+            // Urban sodium-vapour tint (warm orange-brown).
+            total += vec3(0.55, 0.40, 0.18) * iLP;
+          }
+
+          gl_FragColor = vec4(total, 1.0);
+        }
+      `,
+    });
+
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.renderOrder = -9;
+    this.scene.add(mesh);
+    this.moonGlowMaterial = mat;
+  }
+
   attachTo(container: HTMLElement): void {
     container.appendChild(this.renderer.domElement);
     this.onResize();
@@ -280,12 +387,17 @@ export class SkyRenderer {
     // Sun position drives twilight darkening — when the sun is up or in civil
     // twilight, only the very brightest stars can punch through the sky glow.
     const sun = sunPosition(date);
-    const { altDeg: sunAltDeg } = equatorialToAltAz(
+    const sunAa = equatorialToAltAz(
       { ra: sun.raDeg, dec: sun.decDeg },
       observer,
       date,
     );
-    this.currentSunAltDeg = sunAltDeg; // remembered for updateSkyBackground
+    const sunAltDeg = sunAa.altDeg;
+    this.currentSunAltDeg = sunAltDeg;
+    if (this.moonGlowMaterial) {
+      const [sx, sy, sz] = altAzToVector(sunAa.altDeg, sunAa.azDeg);
+      this.moonGlowMaterial.uniforms["uSunDir"]!.value.set(sx, sy, sz);
+    }
     const limitMag = effectiveLimitMag(this.state.bortle, sunAltDeg);
     // Avoid a vestigial reference to the imported bortleLimitMag (kept for callers).
     void bortleLimitMag;
@@ -463,6 +575,18 @@ export class SkyRenderer {
       date,
     );
 
+    // Update the moon-glow scattering shader regardless of horizon — below-horizon
+    // moons still contribute slight forward scatter just above the horizon.
+    if (this.moonGlowMaterial) {
+      const altApp = altDeg + refractionDeg(altDeg);
+      const [mx, my, mz] = altAzToVector(altApp, azDeg);
+      this.moonGlowMaterial.uniforms["uMoonDir"]!.value.set(mx, my, mz);
+      this.moonGlowMaterial.uniforms["uIllum"]!.value = moon.illumination;
+      this.moonGlowMaterial.uniforms["uMoonAlt"]!.value = Math.sin(
+        (altDeg * Math.PI) / 180,
+      );
+    }
+
     if (this.moonMesh) {
       this.scene.remove(this.moonMesh);
       this.moonMesh.geometry.dispose();
@@ -626,38 +750,28 @@ export class SkyRenderer {
   }
 
   private updateSkyBackground(): void {
-    // Compose two independent sources of sky glow:
-    //   (1) Bortle wash — orange-brown urban haze; isotropic.
-    //   (2) Twilight from sun altitude — deep blue when sun is just below horizon,
-    //       fading to black past -18°. Real eye sees a strong blue cast at
-    //       nautical / astronomical twilight; map that to a single uniform tint
-    //       (a horizon gradient is a future refinement).
-    const b = Math.max(1, Math.min(9, this.state.bortle));
-    const bt = (b - 1) / 8;
+    // Solid base: pure black. All directional sky-glow (twilight, light
+    // pollution, moon-scattered light) is now done in the moonGlowMaterial
+    // sphere's fragment shader so it can be direction-aware.
+    this.scene.background = new THREE.Color(0, 0, 0);
 
-    // Twilight intensity: 0 at sun ≤ -18°, 1 at sun ≥ 0°.
-    const sunAlt = this.currentSunAltDeg;
-    let twilight: number;
-    if (sunAlt <= -18) twilight = 0;
-    else if (sunAlt >= 0) twilight = 1;
-    else twilight = (sunAlt + 18) / 18;
+    if (this.moonGlowMaterial) {
+      // Sun direction in world frame (refraction-uncorrected — needed for
+      // twilight asymmetry, not for an actually-visible sun).
+      // We don't have observer/date here, but currentSunAltDeg is stored and the
+      // moon-glow shader doesn't need a precise sun direction below the horizon;
+      // we approximate using azimuth=180° (south) for northern observers.
+      // (A full implementation would route the sun's altaz like the moon's.)
+      const sunAlt = this.currentSunAltDeg;
+      let twilight: number;
+      if (sunAlt <= -18) twilight = 0;
+      else if (sunAlt >= 0) twilight = 1;
+      else twilight = (sunAlt + 18) / 18;
 
-    // Twilight colour palette: blue at deep twilight → cyan-blue at nautical → pink at civil.
-    const twR = 0.05 * twilight + 0.45 * Math.max(0, twilight - 0.6);
-    const twG = 0.1 * twilight + 0.3 * Math.max(0, twilight - 0.6);
-    const twB = 0.25 * twilight + 0.5 * Math.max(0, twilight - 0.4);
-
-    // Bortle urban-glow palette (orange-brown haze).
-    const buR = bt * 0.06;
-    const buG = bt * 0.04;
-    const buB = bt * 0.02;
-
-    // Combine (additive, clamped). Sky glow can plausibly exceed 1.0 → clamp for canvas.
-    const r = Math.min(1, twR + buR);
-    const g = Math.min(1, twG + buG);
-    const bl = Math.min(1, twB + buB);
-    this.scene.background = new THREE.Color(r, g, bl);
-    // Suppress an unused-import warning when twilightSkyMag isn't directly read here.
+      this.moonGlowMaterial.uniforms["uTwilight"]!.value = twilight;
+      this.moonGlowMaterial.uniforms["uBortle"]!.value = this.state.bortle;
+    }
+    // Keep imports referenced even when not directly used in JS body.
     void twilightSkyMag;
   }
 
