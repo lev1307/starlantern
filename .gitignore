@@ -1,6 +1,7 @@
 # Brain Method — private founder memory; never publish to public repo
 # Contains personal context, strategic decisions, funding analysis, competitor research.
 _brain/
+CLAUDE.md
 
 # Environment / secrets
 .env
