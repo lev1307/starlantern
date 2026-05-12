@@ -12,13 +12,31 @@ import * as THREE from "three";
 import { altAzToVector, equatorialToAltAz, type Observer } from "./coords";
 import { BRIGHT_STARS } from "./catalog";
 import type { Quat } from "./quaternion";
+import {
+  bvToRgb,
+  magToFlux,
+  extinctionMag,
+  bortleLimitMag,
+  scotopicSaturation,
+} from "./astrophysics";
+import { moonPosition } from "./moon";
 
 const SKY_RADIUS = 100; // arbitrary — stars on a unit sphere look the same at any radius
 const DEG = Math.PI / 180;
 
+/** GLSL-equivalent smoothstep in JS. */
+function smoothstep(edge0: number, edge1: number, x: number): number {
+  const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
+
 export interface RendererState {
   /** Heading correction slider, degrees added to compass alpha. */
   headingOffsetDeg: number;
+  /** Bortle scale 1 (pristine) .. 9 (inner city). Drives sky-glow + faint-star wash. */
+  bortle: number;
+  /** Exposure scalar applied to the rendered star fluxes (1 = neutral). */
+  exposure: number;
 }
 
 export class SkyRenderer {
@@ -28,7 +46,8 @@ export class SkyRenderer {
   private starPoints: THREE.Points | null = null;
   private starWorldPositions: Float32Array | null = null;
   private cardinals: THREE.Group;
-  state: RendererState = { headingOffsetDeg: 0 };
+  private moonMesh: THREE.Mesh | null = null;
+  state: RendererState = { headingOffsetDeg: 0, bortle: 4, exposure: 1.0 };
 
   constructor(canvas?: HTMLCanvasElement) {
     this.scene = new THREE.Scene();
@@ -62,11 +81,20 @@ export class SkyRenderer {
     this.onResize();
   }
 
-  /** Update star positions from the current observer + UTC time. */
+  /**
+   * Update star positions + per-star color/flux from the current observer + UTC + Bortle.
+   * Pipeline:
+   *   - altaz from equatorial + observer + time
+   *   - airmass-extinct magnitude → flux
+   *   - Bortle floor: stars below the limit go to zero alpha (still in buffer; cheap)
+   *   - B-V → Teff → linear-sRGB color; desaturate toward neutral at low flux (Purkinje)
+   * The fragment shader draws a Moffat-like soft PSF whose intensity is the per-star flux.
+   */
   setSky(observer: Observer, date: Date): void {
     const positions = new Float32Array(BRIGHT_STARS.length * 3);
-    const sizes = new Float32Array(BRIGHT_STARS.length);
+    const fluxes = new Float32Array(BRIGHT_STARS.length);
     const colors = new Float32Array(BRIGHT_STARS.length * 3);
+    const limitMag = bortleLimitMag(this.state.bortle);
 
     for (let i = 0; i < BRIGHT_STARS.length; i++) {
       const s = BRIGHT_STARS[i]!;
@@ -79,12 +107,23 @@ export class SkyRenderer {
       positions[i * 3 + 0] = x * SKY_RADIUS;
       positions[i * 3 + 1] = y * SKY_RADIUS;
       positions[i * 3 + 2] = z * SKY_RADIUS;
-      // size = exp(-mag * 0.5), clamped; brighter stars = larger
-      sizes[i] = Math.min(8, Math.max(1.5, Math.exp(-s.mag * 0.5) * 4));
-      // All white for Step 1 (no B-V color until Step 3).
-      colors[i * 3 + 0] = 1;
-      colors[i * 3 + 1] = 1;
-      colors[i * 3 + 2] = 1;
+
+      // Atmospheric extinction by altitude.
+      const apparentMag = s.mag + extinctionMag(altDeg);
+      // Drop stars fainter than the Bortle limit (with a 0.5-mag soft taper).
+      const visibility = 1 - smoothstep(limitMag - 0.5, limitMag, apparentMag);
+      const flux = magToFlux(apparentMag) * visibility * this.state.exposure;
+      fluxes[i] = flux;
+
+      // True color from B-V → blackbody RGB, then scotopic desaturation toward neutral.
+      const [cr, cg, cb] = bvToRgb(s.bv);
+      const sat = scotopicSaturation(flux);
+      const NEUTRAL_R = 0.85;
+      const NEUTRAL_G = 0.92;
+      const NEUTRAL_B = 1.0;
+      colors[i * 3 + 0] = NEUTRAL_R + sat * (cr - NEUTRAL_R);
+      colors[i * 3 + 1] = NEUTRAL_G + sat * (cg - NEUTRAL_G);
+      colors[i * 3 + 2] = NEUTRAL_B + sat * (cb - NEUTRAL_B);
     }
 
     this.starWorldPositions = positions;
@@ -97,43 +136,141 @@ export class SkyRenderer {
 
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    geometry.setAttribute("size", new THREE.BufferAttribute(sizes, 1));
+    geometry.setAttribute("flux", new THREE.BufferAttribute(fluxes, 1));
     geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
 
     const material = new THREE.ShaderMaterial({
       transparent: true,
       depthWrite: false,
       vertexColors: true,
+      blending: THREE.AdditiveBlending,
       uniforms: {
         uPixelRatio: { value: this.renderer.getPixelRatio() },
       },
       vertexShader: /* glsl */ `
-        attribute float size;
+        attribute float flux;
         varying vec3 vColor;
+        varying float vFlux;
         uniform float uPixelRatio;
         void main() {
           vColor = color;
+          vFlux = flux;
           vec4 mv = modelViewMatrix * vec4(position, 1.0);
           gl_Position = projectionMatrix * mv;
-          // Tiny stars are pixel-fragile; multiplying by pixel ratio keeps DPI-stable.
-          gl_PointSize = size * uPixelRatio * (300.0 / -mv.z);
+          // PSF radius scales with √flux up to a cap — same flux distributed over
+          // a wider area gives a brighter, larger blur, matching the eye's PSF response.
+          float radius = clamp(2.0 + 6.0 * sqrt(max(flux, 0.0001)), 2.0, 18.0);
+          gl_PointSize = radius * uPixelRatio * (320.0 / -mv.z);
         }
       `,
       fragmentShader: /* glsl */ `
         varying vec3 vColor;
+        varying float vFlux;
         void main() {
-          // Soft round point with anti-aliased edges (approximates a tiny PSF).
-          vec2 p = gl_PointCoord - vec2(0.5);
-          float r = length(p);
-          float alpha = smoothstep(0.5, 0.0, r);
-          if (alpha < 0.01) discard;
-          gl_FragColor = vec4(vColor, alpha);
+          // Moffat-like PSF: ((1 + (r/α)²)^-β) with β = 2.5, α = 0.25 in point-coord units.
+          vec2 p = (gl_PointCoord - vec2(0.5)) * 2.0; // p in [-1, 1]
+          float r2 = dot(p, p);
+          float core = pow(1.0 + r2 / 0.06, -2.5);
+          // Optional faint halo for bright stars (additive blending so this just glows).
+          float halo = 0.18 * exp(-r2 * 6.0);
+          float intensity = clamp(core + halo, 0.0, 1.0);
+          float alpha = intensity * clamp(vFlux, 0.0, 4.0);
+          if (alpha < 0.002) discard;
+          gl_FragColor = vec4(vColor * intensity, alpha);
         }
       `,
     });
 
     this.starPoints = new THREE.Points(geometry, material);
     this.scene.add(this.starPoints);
+
+    this.updateMoon(observer, date);
+    this.updateSkyBackground();
+  }
+
+  /** Place the moon on the sky sphere with the current phase / illumination. */
+  private updateMoon(observer: Observer, date: Date): void {
+    const moon = moonPosition(date);
+    const { altDeg, azDeg } = equatorialToAltAz(
+      { ra: moon.raDeg, dec: moon.decDeg },
+      observer,
+      date,
+    );
+
+    if (this.moonMesh) {
+      this.scene.remove(this.moonMesh);
+      this.moonMesh.geometry.dispose();
+      (this.moonMesh.material as THREE.Material).dispose();
+      this.moonMesh = null;
+    }
+    if (altDeg < -2) return; // below horizon — skip render
+
+    // Render the moon as a flat disk on the sky sphere whose angular size matches.
+    const angular = moon.diameterDeg * DEG;
+    const radius = SKY_RADIUS * Math.tan(angular / 2);
+    const geom = new THREE.CircleGeometry(radius, 64);
+
+    const mat = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.NormalBlending,
+      uniforms: {
+        // Phase angle in radians — 0 = full, ±π = new.
+        uPhase: { value: moon.phaseAngleDeg * DEG },
+        // Bright-limb position angle — orient the terminator correctly in image plane.
+        uLimbAngle: { value: moon.brightLimbAngleDeg * DEG },
+      },
+      vertexShader: /* glsl */ `
+        varying vec2 vUv;
+        void main() {
+          // CircleGeometry's "uv" runs from (0,0) at corner to (1,1) at opposite corner —
+          // remap to disk-coords in [-1,1]² with center 0.
+          vUv = uv * 2.0 - vec2(1.0);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        varying vec2 vUv;
+        uniform float uPhase;
+        uniform float uLimbAngle;
+        void main() {
+          float r = length(vUv);
+          if (r > 1.0) discard;
+          // Rotate uv so the bright-limb mid-point lies along +x.
+          float cl = cos(uLimbAngle), sl = sin(uLimbAngle);
+          vec2 r_uv = vec2(cl * vUv.x + sl * vUv.y, -sl * vUv.x + cl * vUv.y);
+          // The terminator is the great circle at x = cos(phase) on the sphere when
+          // projected onto the disk → the visible-illumination test is r_uv.x > cos(phase).
+          float lit = step(cos(uPhase), r_uv.x);
+          // Soft limb: smooth Lambertian fall-off near edge so it doesn't read like a coin.
+          float limbSoft = pow(1.0 - r, 0.3);
+          // Earthshine: faint glow on the dark side (~5% of full illumination).
+          float earthshine = (1.0 - lit) * 0.05;
+          // Lunar surface tone — slightly warm gray.
+          vec3 col = vec3(0.95, 0.92, 0.85) * (lit * limbSoft + earthshine);
+          gl_FragColor = vec4(col, lit + earthshine * 0.5);
+        }
+      `,
+    });
+
+    const mesh = new THREE.Mesh(geom, mat);
+    const [x, y, z] = altAzToVector(altDeg, azDeg);
+    mesh.position.set(x * SKY_RADIUS, y * SKY_RADIUS, z * SKY_RADIUS);
+    // Orient the disk so its normal points back at the camera (origin).
+    mesh.lookAt(0, 0, 0);
+    this.scene.add(mesh);
+    this.moonMesh = mesh;
+  }
+
+  private updateSkyBackground(): void {
+    // At higher Bortle, the sky is no longer black — paint a faint background tint.
+    // Mapping: Bortle 1 → near-black; Bortle 9 → urban orange-brown haze.
+    const b = Math.max(1, Math.min(9, this.state.bortle));
+    const t = (b - 1) / 8;
+    const r = 0.0 + t * 0.06;
+    const g = 0.0 + t * 0.04;
+    const blue = 0.0 + t * 0.02;
+    this.scene.background = new THREE.Color(r, g, blue);
   }
 
   /**

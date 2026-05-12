@@ -30,6 +30,16 @@ app.innerHTML = `
         <input id="offset" type="range" min="-180" max="180" step="0.5" value="0" />
         <span id="offset-val">0°</span>
       </label>
+      <label>
+        Bortle
+        <input id="bortle" type="range" min="1" max="9" step="1" value="4" />
+        <span id="bortle-val">4</span>
+      </label>
+      <label>
+        Exposure
+        <input id="exposure" type="range" min="0.2" max="3" step="0.05" value="1" />
+        <span id="exposure-val">1.0×</span>
+      </label>
       <div class="btn-row">
         <button id="start-btn">Start (grant sensors)</button>
         <button id="manual-btn" type="button">Use manual location</button>
@@ -122,6 +132,29 @@ let lockTimeMs: number | null = null;
 $offset.addEventListener("input", () => {
   renderer.state.headingOffsetDeg = parseFloat($offset.value);
   $offsetVal.textContent = `${renderer.state.headingOffsetDeg.toFixed(1)}°`;
+});
+
+const $bortle = document.getElementById("bortle") as HTMLInputElement;
+const $bortleVal = document.getElementById("bortle-val")!;
+const $exposure = document.getElementById("exposure") as HTMLInputElement;
+const $exposureVal = document.getElementById("exposure-val")!;
+
+function refreshSky(): void {
+  const fix = sensors.getLocation();
+  if (fix)
+    renderer.setSky({ latDeg: fix.latDeg, lonDeg: fix.lonDeg }, new Date());
+}
+
+$bortle.addEventListener("input", () => {
+  renderer.state.bortle = parseFloat($bortle.value);
+  $bortleVal.textContent = `${renderer.state.bortle.toFixed(0)}`;
+  refreshSky();
+});
+
+$exposure.addEventListener("input", () => {
+  renderer.state.exposure = parseFloat($exposure.value);
+  $exposureVal.textContent = `${renderer.state.exposure.toFixed(2)}×`;
+  refreshSky();
 });
 
 let latestOrientation: { a: number; b: number; g: number } | null = null;
