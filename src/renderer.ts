@@ -155,6 +155,10 @@ export class SkyRenderer {
         // Twilight fade-out: when the sky is bright, the MW is invisible.
         // 0 = no twilight (full dark), 1 = daylight.
         uTwilight: { value: 0 },
+        // Sun's ecliptic longitude (degrees) drives the zodiacal-light cone.
+        uSunEclipticLon: { value: 0 },
+        // Mean obliquity for the equatorial→ecliptic rotation in the shader.
+        uObliquityRad: { value: (23.4393 * Math.PI) / 180 },
       },
       depthWrite: false,
       depthTest: false,
@@ -177,6 +181,8 @@ export class SkyRenderer {
         varying vec3 vEq;
         uniform float uBortle;
         uniform float uTwilight;
+        uniform float uSunEclipticLon;
+        uniform float uObliquityRad;
 
         const float PI = 3.141592653589793;
         const float DEG = PI / 180.0;
@@ -232,21 +238,55 @@ export class SkyRenderer {
           return disc * longBulge * mottle;
         }
 
+        // Equatorial direction → ecliptic (lambda, beta) in degrees.
+        vec2 dirToEcliptic(vec3 dEq, float epsRad) {
+          float cosE = cos(epsRad), sinE = sin(epsRad);
+          // Rotation about equatorial +X by -epsilon (eq → ecliptic).
+          vec3 e = vec3(dEq.x, dEq.y * cosE + dEq.z * sinE, -dEq.y * sinE + dEq.z * cosE);
+          e = normalize(e);
+          float beta = asin(clamp(e.z, -1.0, 1.0)) * RAD;
+          float lambda = atan(e.y, e.x) * RAD;
+          lambda = mod(lambda + 360.0, 360.0);
+          return vec2(lambda, beta);
+        }
+
+        // Zodiacal-light density (dimensionless). Strong cone along the ecliptic
+        // toward the sun, weak gegenschein bump at the anti-solar point.
+        float zodiacalDensity(float lambdaDeg, float betaDeg, float sunLonDeg) {
+          float dLambda = mod(lambdaDeg - sunLonDeg + 540.0, 360.0) - 180.0; // (-180, 180]
+          float absDL = abs(dLambda);
+          // Vertical fall-off off the ecliptic — sech² with scale-height ~ 18°.
+          float sech = 1.0 / cosh(betaDeg / 18.0);
+          float discProf = sech * sech;
+          // Longitudinal: bright near sun, falling sharply with elongation.
+          float coneCore = 0.5 / max(absDL, 5.0);
+          // Gegenschein: ~3-4° wide Gaussian at 180° elongation.
+          float anti = absDL - 180.0;
+          float gegen = 0.4 * exp(-anti * anti / 18.0);
+          return discProf * (coneCore + gegen);
+        }
+
         void main() {
-          vec2 raDec = dirToRaDec(vEq);
+          vec3 vEqn = normalize(vEq);
+          vec2 raDec = dirToRaDec(vEqn);
           vec2 lb = raDecToGalactic(raDec.x, raDec.y);
           float density = mwDensity(lb.x, lb.y);
 
-          // Bortle fade: at Bortle ≥ 6 the MW washes out completely.
           float bortleFade = clamp(1.0 - (uBortle - 1.0) / 5.0, 0.0, 1.0);
-          // Twilight fade: at twilight > ~0.3 the MW is invisible.
           float twilightFade = clamp(1.0 - uTwilight * 3.0, 0.0, 1.0);
 
-          float intensity = density * 0.07 * bortleFade * twilightFade;
-          // Slightly warm grey-blue tint — real MW reads cooler than starlight
-          // because of the integrated K-giant + dust extinction balance.
-          vec3 col = vec3(0.55, 0.6, 0.72) * intensity;
-          gl_FragColor = vec4(col, 1.0);
+          float mwIntensity = density * 0.07 * bortleFade * twilightFade;
+          vec3 mwCol = vec3(0.55, 0.6, 0.72) * mwIntensity;
+
+          // Zodiacal light — only meaningful at very dark sites (Bortle ≤ 3) and
+          // in the absence of strong twilight. Same fade gates as the MW.
+          vec2 ecl = dirToEcliptic(vEqn, uObliquityRad);
+          float zod = zodiacalDensity(ecl.x, ecl.y, uSunEclipticLon);
+          float zodIntensity = zod * 0.04 * bortleFade * twilightFade;
+          // Zodiacal dust scatters sunlight near-white with a faint yellow tint.
+          vec3 zodCol = vec3(0.95, 0.92, 0.78) * zodIntensity;
+
+          gl_FragColor = vec4(mwCol + zodCol, 1.0);
         }
       `,
     });
@@ -565,6 +605,9 @@ export class SkyRenderer {
     else if (sunAltDeg >= 0) twilight = 1;
     else twilight = (sunAltDeg + 18) / 18;
     this.milkyWayMaterial.uniforms["uTwilight"]!.value = twilight;
+    // Sun's ecliptic longitude drives the zodiacal cone direction.
+    this.milkyWayMaterial.uniforms["uSunEclipticLon"]!.value =
+      sunPosition(date).lambdaDeg;
   }
 
   /** Place the moon on the sky sphere with the current phase / illumination. */
