@@ -30,6 +30,19 @@ function smoothstep(edge0: number, edge1: number, x: number): number {
   return t * t * (3 - 2 * t);
 }
 
+export interface StereoState {
+  /** Stereo (cardboard / phone-headmount) split-screen output enabled. */
+  enabled: boolean;
+  /** Interpupillary distance in metres. ~63 mm average adult; default 64 mm. */
+  ipdM: number;
+  /** Brown-Conrady radial barrel coefficient k1. ~0.20 cancels typical Cardboard pincushion. */
+  k1: number;
+  /** Brown-Conrady radial barrel coefficient k2 (quartic term). */
+  k2: number;
+  /** Chromatic-aberration correction: 0 = off, 0.02 = mild offset. */
+  chromatic: number;
+}
+
 export interface RendererState {
   /** Heading correction slider, degrees added to compass alpha. */
   headingOffsetDeg: number;
@@ -37,6 +50,8 @@ export interface RendererState {
   bortle: number;
   /** Exposure scalar applied to the rendered star fluxes (1 = neutral). */
   exposure: number;
+  /** Stereo / cardboard-headmount rendering options. */
+  stereo: StereoState;
 }
 
 export class SkyRenderer {
@@ -47,7 +62,27 @@ export class SkyRenderer {
   private starWorldPositions: Float32Array | null = null;
   private cardinals: THREE.Group;
   private moonMesh: THREE.Mesh | null = null;
-  state: RendererState = { headingOffsetDeg: 0, bortle: 4, exposure: 1.0 };
+  state: RendererState = {
+    headingOffsetDeg: 0,
+    bortle: 4,
+    exposure: 1.0,
+    stereo: {
+      enabled: false,
+      ipdM: 0.064,
+      k1: 0.22,
+      k2: 0.05,
+      chromatic: 0.01,
+    },
+  };
+
+  // --- Stereo plumbing (lazy-initialised on first stereo render) -----------
+  private leftCamera: THREE.PerspectiveCamera | null = null;
+  private rightCamera: THREE.PerspectiveCamera | null = null;
+  private leftRT: THREE.WebGLRenderTarget | null = null;
+  private rightRT: THREE.WebGLRenderTarget | null = null;
+  private barrelScene: THREE.Scene | null = null;
+  private barrelCamera: THREE.OrthographicCamera | null = null;
+  private barrelMaterial: THREE.ShaderMaterial | null = null;
 
   constructor(canvas?: HTMLCanvasElement) {
     this.scene = new THREE.Scene();
@@ -432,7 +467,187 @@ export class SkyRenderer {
   }
 
   render(): void {
-    this.renderer.render(this.scene, this.camera);
+    if (this.state.stereo.enabled) {
+      this.renderStereo();
+    } else {
+      // Make sure the offscreen RT isn't bound from a previous stereo frame.
+      this.renderer.setRenderTarget(null);
+      this.renderer.render(this.scene, this.camera);
+    }
+  }
+
+  /**
+   * Cardboard-style side-by-side stereo with per-eye barrel-distortion post-process.
+   * Layout:
+   *   - Offscreen RT shaped like the canvas. Left half = left-eye scene, right half = right-eye.
+   *   - Two cameras parented to (and following the orientation of) `this.camera`, offset
+   *     by ±IPD/2 along the local +X (right) axis.
+   *   - Fullscreen quad samples the RT and applies a Brown-Conrady barrel warp per half,
+   *     with optional per-channel chromatic offset for cheap RGB-aberration correction.
+   */
+  private renderStereo(): void {
+    this.ensureStereoResources();
+
+    const w = this.renderer.domElement.width;
+    const h = this.renderer.domElement.height;
+    const halfW = Math.floor(w / 2);
+
+    // Resize per-eye render targets if the canvas dimensions changed.
+    if (
+      this.leftRT &&
+      (this.leftRT.width !== halfW || this.leftRT.height !== h)
+    ) {
+      this.leftRT.setSize(halfW, h);
+      this.rightRT!.setSize(halfW, h);
+    }
+
+    // Sync stereo cameras from the head pose (= this.camera).
+    const { ipdM } = this.state.stereo;
+    const aspect = halfW / Math.max(1, h);
+
+    for (const eye of ["left", "right"] as const) {
+      const cam = eye === "left" ? this.leftCamera! : this.rightCamera!;
+      cam.aspect = aspect;
+      cam.fov = this.camera.fov;
+      cam.near = this.camera.near;
+      cam.far = this.camera.far;
+      cam.updateProjectionMatrix();
+      cam.quaternion.copy(this.camera.quaternion);
+      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(
+        this.camera.quaternion,
+      );
+      const offset = (eye === "left" ? -1 : 1) * (ipdM / 2);
+      cam.position.copy(this.camera.position).add(right.multiplyScalar(offset));
+    }
+
+    // Render each eye into its own render target. Each RT is halfW × h, so the
+    // camera projection naturally fills it without viewport gymnastics.
+    this.renderer.setRenderTarget(this.leftRT!);
+    this.renderer.render(this.scene, this.leftCamera!);
+
+    this.renderer.setRenderTarget(this.rightRT!);
+    this.renderer.render(this.scene, this.rightCamera!);
+
+    // Update barrel shader uniforms.
+    const m = this.barrelMaterial!;
+    m.uniforms["uK1"]!.value = this.state.stereo.k1;
+    m.uniforms["uK2"]!.value = this.state.stereo.k2;
+    m.uniforms["uChroma"]!.value = this.state.stereo.chromatic;
+    m.uniforms["uLeftTex"]!.value = this.leftRT!.texture;
+    m.uniforms["uRightTex"]!.value = this.rightRT!.texture;
+
+    // Present barrel-distorted output to the canvas.
+    this.renderer.setRenderTarget(null);
+    this.renderer.render(this.barrelScene!, this.barrelCamera!);
+  }
+
+  private ensureStereoResources(): void {
+    if (this.leftRT) return;
+    const w = this.renderer.domElement.width;
+    const h = this.renderer.domElement.height;
+    const halfW = Math.floor(w / 2);
+
+    const rtOpts = {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      depthBuffer: true,
+      stencilBuffer: false,
+    };
+    this.leftRT = new THREE.WebGLRenderTarget(halfW, h, rtOpts);
+    this.rightRT = new THREE.WebGLRenderTarget(halfW, h, rtOpts);
+
+    this.leftCamera = this.camera.clone();
+    this.rightCamera = this.camera.clone();
+
+    this.barrelScene = new THREE.Scene();
+    this.barrelCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+    this.barrelMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uLeftTex: { value: null },
+        uRightTex: { value: null },
+        uK1: { value: this.state.stereo.k1 },
+        uK2: { value: this.state.stereo.k2 },
+        uChroma: { value: this.state.stereo.chromatic },
+      },
+      depthTest: false,
+      depthWrite: false,
+      vertexShader: /* glsl */ `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        precision highp float;
+        varying vec2 vUv;
+        uniform sampler2D uLeftTex;
+        uniform sampler2D uRightTex;
+        uniform float uK1;
+        uniform float uK2;
+        uniform float uChroma;
+
+        // Apply Brown-Conrady barrel warp centred on (0.5, 0.5) of the eye's RT.
+        // halfUv is in [0,1]² over the eye's RT (the RT is already half-canvas wide).
+        // Returns (r, g, b, mask) where mask = 1 if the warped UV is in range, else 0.
+        vec4 sampleEye(vec2 halfUv, sampler2D tex, float k1) {
+          vec2 c = halfUv - vec2(0.5);
+          float r2 = dot(c, c);
+          float factor = 1.0 + k1 * r2 + uK2 * r2 * r2;
+          vec2 warped = c * factor + vec2(0.5);
+          if (any(lessThan(warped, vec2(0.0))) || any(greaterThan(warped, vec2(1.0)))) {
+            return vec4(0.0);
+          }
+          return texture2D(tex, warped);
+        }
+
+        void main() {
+          bool isRight = vUv.x >= 0.5;
+          // halfUv in [0,1]² over the eye's RT.
+          vec2 halfUv = vec2((isRight ? (vUv.x - 0.5) : vUv.x) * 2.0, vUv.y);
+
+          // Chromatic aberration: slightly different k1 per colour channel.
+          float kR = uK1 * (1.0 - uChroma);
+          float kG = uK1;
+          float kB = uK1 * (1.0 + uChroma);
+
+          float r, g, b;
+          if (isRight) {
+            r = sampleEye(halfUv, uRightTex, kR).r;
+            g = sampleEye(halfUv, uRightTex, kG).g;
+            b = sampleEye(halfUv, uRightTex, kB).b;
+          } else {
+            r = sampleEye(halfUv, uLeftTex, kR).r;
+            g = sampleEye(halfUv, uLeftTex, kG).g;
+            b = sampleEye(halfUv, uLeftTex, kB).b;
+          }
+          gl_FragColor = vec4(r, g, b, 1.0);
+        }
+      `,
+    });
+
+    const quad = new THREE.Mesh(
+      new THREE.PlaneGeometry(2, 2),
+      this.barrelMaterial,
+    );
+    this.barrelScene.add(quad);
+  }
+
+  /** Attempt to enter an `immersive-vr` WebXR session. Returns true on success. */
+  async tryEnterImmersiveVr(): Promise<boolean> {
+    const xr = (navigator as Navigator & { xr?: XRSystem }).xr;
+    if (!xr) return false;
+    try {
+      const supported = await xr.isSessionSupported("immersive-vr");
+      if (!supported) return false;
+      const session = await xr.requestSession("immersive-vr");
+      this.renderer.xr.enabled = true;
+      await this.renderer.xr.setSession(session);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private buildCardinalMarkers(): THREE.Group {

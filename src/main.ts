@@ -40,6 +40,33 @@ app.innerHTML = `
         <input id="exposure" type="range" min="0.2" max="3" step="0.05" value="1" />
         <span id="exposure-val">1.0×</span>
       </label>
+      <details class="stereo-details">
+        <summary>Stereo (headmount)</summary>
+        <div class="btn-row">
+          <button id="vr-btn" type="button">Enter stereo</button>
+          <button id="xr-btn" type="button">Try WebXR</button>
+        </div>
+        <label>
+          IPD (mm)
+          <input id="ipd" type="range" min="50" max="80" step="0.5" value="64" />
+          <span id="ipd-val">64.0</span>
+        </label>
+        <label>
+          Barrel k1
+          <input id="k1" type="range" min="0" max="0.6" step="0.01" value="0.22" />
+          <span id="k1-val">0.22</span>
+        </label>
+        <label>
+          Barrel k2
+          <input id="k2" type="range" min="0" max="0.3" step="0.005" value="0.05" />
+          <span id="k2-val">0.05</span>
+        </label>
+        <label>
+          Chromatic
+          <input id="chroma" type="range" min="0" max="0.05" step="0.001" value="0.01" />
+          <span id="chroma-val">0.010</span>
+        </label>
+      </details>
       <div class="btn-row">
         <button id="start-btn">Start (grant sensors)</button>
         <button id="manual-btn" type="button">Use manual location</button>
@@ -88,6 +115,10 @@ style.textContent = `
     padding: 0.45rem 0.6rem; font: inherit; cursor: pointer;
   }
   button:hover { background: rgba(255,255,255,0.14); }
+  .stereo-details { margin-top: 0.5rem; }
+  .stereo-details summary { cursor: pointer; opacity: 0.7; font-weight: 500; }
+  .stereo-details[open] summary { opacity: 1; }
+  .stereo-details label { margin-top: 0.35rem; }
   .overlay {
     position: fixed; inset: 0; background: rgba(0,0,0,0.85);
     display: flex; align-items: center; justify-content: center;
@@ -155,6 +186,62 @@ $exposure.addEventListener("input", () => {
   renderer.state.exposure = parseFloat($exposure.value);
   $exposureVal.textContent = `${renderer.state.exposure.toFixed(2)}×`;
   refreshSky();
+});
+
+// --- Stereo / headmount calibration --------------------------------------
+const $vr = document.getElementById("vr-btn") as HTMLButtonElement;
+const $xr = document.getElementById("xr-btn") as HTMLButtonElement;
+const $ipd = document.getElementById("ipd") as HTMLInputElement;
+const $ipdVal = document.getElementById("ipd-val")!;
+const $k1 = document.getElementById("k1") as HTMLInputElement;
+const $k1Val = document.getElementById("k1-val")!;
+const $k2 = document.getElementById("k2") as HTMLInputElement;
+const $k2Val = document.getElementById("k2-val")!;
+const $chroma = document.getElementById("chroma") as HTMLInputElement;
+const $chromaVal = document.getElementById("chroma-val")!;
+
+$vr.addEventListener("click", () => {
+  const s = renderer.state.stereo;
+  s.enabled = !s.enabled;
+  $vr.textContent = s.enabled ? "Exit stereo" : "Enter stereo";
+  // Side-by-side stereo on phones really wants landscape + fullscreen. Best-effort.
+  if (s.enabled && document.fullscreenEnabled && !document.fullscreenElement) {
+    void document.documentElement.requestFullscreen?.().catch(() => {});
+  }
+});
+
+$xr.addEventListener("click", async () => {
+  $xr.disabled = true;
+  const prev = $xr.textContent;
+  $xr.textContent = "trying…";
+  try {
+    const ok = await renderer.tryEnterImmersiveVr();
+    $xr.textContent = ok ? "WebXR active" : "no WebXR";
+  } catch {
+    $xr.textContent = "no WebXR";
+  } finally {
+    setTimeout(() => {
+      $xr.textContent = prev ?? "Try WebXR";
+      $xr.disabled = false;
+    }, 1500);
+  }
+});
+
+$ipd.addEventListener("input", () => {
+  renderer.state.stereo.ipdM = parseFloat($ipd.value) / 1000;
+  $ipdVal.textContent = parseFloat($ipd.value).toFixed(1);
+});
+$k1.addEventListener("input", () => {
+  renderer.state.stereo.k1 = parseFloat($k1.value);
+  $k1Val.textContent = renderer.state.stereo.k1.toFixed(2);
+});
+$k2.addEventListener("input", () => {
+  renderer.state.stereo.k2 = parseFloat($k2.value);
+  $k2Val.textContent = renderer.state.stereo.k2.toFixed(3);
+});
+$chroma.addEventListener("input", () => {
+  renderer.state.stereo.chromatic = parseFloat($chroma.value);
+  $chromaVal.textContent = renderer.state.stereo.chromatic.toFixed(3);
 });
 
 let latestOrientation: { a: number; b: number; g: number } | null = null;
