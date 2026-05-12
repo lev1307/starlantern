@@ -162,18 +162,19 @@ export class SkyRenderer {
       transparent: true,
       blending: THREE.AdditiveBlending,
       vertexShader: /* glsl */ `
-        varying vec3 vWorldDir;
+        varying vec3 vEq;
         void main() {
-          // Pass the world-space direction so the fragment can compute (RA, Dec).
-          // The mesh is at the origin, so world position = direction × radius.
-          vec4 mv = modelViewMatrix * vec4(position, 1.0);
-          gl_Position = projectionMatrix * mv;
-          vWorldDir = (modelMatrix * vec4(position, 1.0)).xyz;
+          // Mesh-local position is treated as an equatorial-frame direction.
+          // The mesh's quaternion (set in updateMilkyWay() to equatorial->world)
+          // takes care of placing the band correctly in altaz space; the shader
+          // gets to do its RA/Dec math in the simpler equatorial frame.
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          vEq = position;
         }
       `,
       fragmentShader: /* glsl */ `
         precision highp float;
-        varying vec3 vWorldDir;
+        varying vec3 vEq;
         uniform float uBortle;
         uniform float uTwilight;
 
@@ -232,7 +233,7 @@ export class SkyRenderer {
         }
 
         void main() {
-          vec2 raDec = dirToRaDec(vWorldDir);
+          vec2 raDec = dirToRaDec(vEq);
           vec2 lb = raDecToGalactic(raDec.x, raDec.y);
           float density = mwDensity(lb.x, lb.y);
 
