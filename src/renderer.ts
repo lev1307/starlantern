@@ -595,7 +595,66 @@ export class SkyRenderer {
     this.updateMoon(observer, date);
     this.updatePlanets(observer, date);
     this.updateMilkyWay(observer, date, sunAltDeg);
+    this.updateSun(sunAa);
     this.updateSkyBackground();
+  }
+
+  private sunMesh: THREE.Mesh | null = null;
+
+  /**
+   * Render the sun as a bright yellow-white disc at its altaz position.
+   * Half-degree apparent diameter (real value: 31'59" ≈ 0.533°). When the sun
+   * is well below the horizon the disc skips render — but during civil
+   * twilight a faint glow can still be appropriate to show, so we keep the
+   * threshold at altDeg < -2°.
+   */
+  private updateSun(sunAa: { altDeg: number; azDeg: number }): void {
+    if (this.sunMesh) {
+      this.scene.remove(this.sunMesh);
+      this.sunMesh.geometry.dispose();
+      (this.sunMesh.material as THREE.Material).dispose();
+      this.sunMesh = null;
+    }
+    if (sunAa.altDeg < -2) return;
+
+    const angularDeg = 0.533;
+    const radius = SKY_RADIUS * Math.tan((angularDeg / 2) * DEG);
+    const geom = new THREE.CircleGeometry(radius, 64);
+
+    const mat = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      vertexShader: /* glsl */ `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv * 2.0 - vec2(1.0);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        varying vec2 vUv;
+        void main() {
+          float r = length(vUv);
+          if (r > 1.0) discard;
+          // Hard-edged disc with a thin chromatic limb (atmospheric reddening
+          // near horizon — handled implicitly by extincted brightness instead).
+          float intensity = smoothstep(1.0, 0.96, r);
+          // Sun surface tone — white-yellow.
+          vec3 col = vec3(1.0, 0.97, 0.85);
+          gl_FragColor = vec4(col * intensity, intensity);
+        }
+      `,
+    });
+
+    const mesh = new THREE.Mesh(geom, mat);
+    const altApp = sunAa.altDeg + refractionDeg(sunAa.altDeg);
+    const [x, y, z] = altAzToVector(altApp, sunAa.azDeg);
+    mesh.position.set(x * SKY_RADIUS, y * SKY_RADIUS, z * SKY_RADIUS);
+    mesh.lookAt(0, 0, 0);
+    mesh.renderOrder = 5; // above stars but below HUD
+    this.scene.add(mesh);
+    this.sunMesh = mesh;
   }
 
   /**
@@ -778,6 +837,24 @@ export class SkyRenderer {
         uniform float uPhase;
         uniform float uLimbAngle;
         uniform float uEarthshine;
+
+        // Hashed value-noise — used to build the lunar mare pattern. Coarse
+        // cells (~8 across the disc) give the dark / light patchwork that
+        // gives the "man in the moon" silhouette at naked-eye resolution.
+        float hash(vec2 p) {
+          return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+        }
+        float vnoise(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          float a = hash(i);
+          float b = hash(i + vec2(1.0, 0.0));
+          float c = hash(i + vec2(0.0, 1.0));
+          float d = hash(i + vec2(1.0, 1.0));
+          vec2 u = f * f * (3.0 - 2.0 * f);
+          return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+        }
+
         void main() {
           float r = length(vUv);
           if (r > 1.0) discard;
@@ -785,12 +862,21 @@ export class SkyRenderer {
           vec2 r_uv = vec2(cl * vUv.x + sl * vUv.y, -sl * vUv.x + cl * vUv.y);
           float lit = step(cos(uPhase), r_uv.x);
           float limbSoft = pow(1.0 - r, 0.3);
-          // Earthshine on the dark hemisphere; intensity from JS-side uniform
-          // (driven by 1 − moon-illumination → near-zero at full, ~6 % at new).
+
+          // Lunar mare pattern. Two octaves of value-noise sampled on the
+          // disc surface, biased so ~40 % of the visible face is "mare"
+          // (basaltic-flood darker regions). The fixed seed scale means the
+          // pattern is stable — it's the same Moon every time, in the same
+          // orientation up to libration (which we don't model).
+          vec2 surf = vUv * 4.0; // coarse cells across the disc
+          float mareLow = vnoise(surf);
+          float mareHigh = vnoise(surf * 3.1 + vec2(7.3, 1.9));
+          float mareMask = smoothstep(0.45, 0.55, mareLow * 0.7 + mareHigh * 0.3);
+          // Highlands tone is the original warm gray; mare are noticeably darker.
+          vec3 surfaceTone = mix(vec3(0.95, 0.92, 0.85), vec3(0.55, 0.52, 0.47), mareMask);
+
           float earthshine = (1.0 - lit) * uEarthshine;
-          // Lunar surface tone — slightly warm gray; earthshine is a touch bluer
-          // because the light comes from the daytime Earth's blue sky.
-          vec3 litCol = vec3(0.95, 0.92, 0.85) * lit * limbSoft;
+          vec3 litCol = surfaceTone * lit * limbSoft;
           vec3 darkCol = vec3(0.55, 0.65, 0.78) * earthshine;
           gl_FragColor = vec4(litCol + darkCol, lit + earthshine * 1.2);
         }
