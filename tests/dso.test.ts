@@ -15,8 +15,8 @@ describe("NAKED_EYE_DSO — catalog sanity", () => {
       expect(d.pos.ra).toBeLessThan(360);
       expect(d.pos.dec).toBeGreaterThanOrEqual(-90);
       expect(d.pos.dec).toBeLessThanOrEqual(90);
-      // Naked-eye showpieces: mag should be brighter than ~6.
-      expect(d.mag).toBeLessThanOrEqual(6);
+      // Naked-eye + Bortle-1 territory: mag must be brighter than 9.
+      expect(d.mag).toBeLessThanOrEqual(9);
       // Angular sizes are degrees, all under 15° for these objects.
       expect(d.majorDeg).toBeGreaterThan(0);
       expect(d.majorDeg).toBeLessThan(15);

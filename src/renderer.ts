@@ -28,6 +28,7 @@ import { allPlanetPositions } from "./planets";
 import { visibleSatellites } from "./satellites";
 import { NAKED_EYE_DSO, type NakedEyeDSO } from "./dso";
 import { sampleNewMeteors, type MeteorSpec } from "./meteors";
+import { auroralVisibility } from "./aurora";
 
 const SKY_RADIUS = 100; // arbitrary — stars on a unit sphere look the same at any radius
 const DEG = Math.PI / 180;
@@ -58,6 +59,8 @@ export interface RendererState {
   bortle: number;
   /** Exposure scalar applied to the rendered star fluxes (1 = neutral). */
   exposure: number;
+  /** Planetary K geomagnetic activity index 0..9. Drives auroral oval extent. */
+  kp: number;
   /** Stereo / cardboard-headmount rendering options. */
   stereo: StereoState;
 }
@@ -79,6 +82,7 @@ export class SkyRenderer {
   private meteorGroup: THREE.Group | null = null;
   private activeMeteors: Array<{ spec: MeteorSpec; mesh: THREE.Mesh }> = [];
   private lastMeteorSampleMs = 0;
+  private auroraMaterial: THREE.ShaderMaterial | null = null;
   /** Observer most recently passed to setSky(); used by per-frame satellite update. */
   private lastObserver: Observer | null = null;
   /** Sun altitude at the most recent setSky() call (degrees, refraction-uncorrected). */
@@ -94,6 +98,7 @@ export class SkyRenderer {
     headingOffsetDeg: 0,
     bortle: 4,
     exposure: 1.0,
+    kp: 3,
     stereo: {
       enabled: false,
       ipdM: 0.064,
@@ -137,6 +142,7 @@ export class SkyRenderer {
     this.scene.add(this.cardinals);
     this.buildMilkyWay();
     this.buildMoonGlow();
+    this.buildAurora();
 
     window.addEventListener("resize", this.onResize);
   }
@@ -484,6 +490,12 @@ export class SkyRenderer {
     const colors = new Float32Array(catalog.length * 3);
     const twinkleAmps = new Float32Array(catalog.length);
     const twinklePhases = new Float32Array(catalog.length);
+    // Per-star atmospheric chromatic dispersion strength. Very bright stars near
+    // the horizon (Sirius rising, Capella low in autumn) visibly split into
+    // red-and-blue components because differential refraction shifts blue ~30"
+    // higher than red at altitude 10°. Faint stars don't show it (eye can't
+    // resolve the split below mag ~1).
+    const dispersions = new Float32Array(catalog.length);
     // Sun position drives twilight darkening — when the sun is up or in civil
     // twilight, only the very brightest stars can punch through the sky glow.
     const sun = sunPosition(date);
@@ -527,6 +539,14 @@ export class SkyRenderer {
       // Per-star twinkle: amplitude grows with airmass; deterministic phase keeps
       // adjacent stars from blinking in sync (would read as artificial).
       twinkleAmps[i] = scintillationAmplitude(altDeg);
+
+      // Chromatic dispersion: scales as (sec(z) - 1) for the differential
+      // refraction part, gated by brightness (only the bright stars show it).
+      // Cap below altitude 30° — vanishes by zenith.
+      const cosZ = Math.max(0.05, Math.sin(Math.max(0.5, altDeg) * DEG));
+      const secMinus1 = 1 / cosZ - 1;
+      const brightFactor = s.mag < 1.5 ? 1 : s.mag < 2.5 ? 0.4 : 0;
+      dispersions[i] = Math.min(1, secMinus1 * 0.6) * brightFactor;
       // Hash RA+Dec to a stable per-star phase ∈ [0, 2π).
       twinklePhases[i] =
         (((s.ra * 13.37 + s.dec * 7.91) % (2 * Math.PI)) + 2 * Math.PI) %
@@ -563,6 +583,10 @@ export class SkyRenderer {
       "twinklePhase",
       new THREE.BufferAttribute(twinklePhases, 1),
     );
+    geometry.setAttribute(
+      "dispersion",
+      new THREE.BufferAttribute(dispersions, 1),
+    );
 
     const material = new THREE.ShaderMaterial({
       transparent: true,
@@ -577,8 +601,10 @@ export class SkyRenderer {
         attribute float flux;
         attribute float twinkleAmp;
         attribute float twinklePhase;
+        attribute float dispersion;
         varying vec3 vColor;
         varying float vFlux;
+        varying float vDispersion;
         uniform float uPixelRatio;
         uniform float uTime;
         void main() {
@@ -594,6 +620,7 @@ export class SkyRenderer {
           float fluxMod = flux * (1.0 + twinkleAmp * modulation);
           vColor = color;
           vFlux = fluxMod;
+          vDispersion = dispersion;
           vec4 mv = modelViewMatrix * vec4(position, 1.0);
           gl_Position = projectionMatrix * mv;
           // PSF radius scales with √flux up to a cap — same flux distributed over
@@ -605,25 +632,44 @@ export class SkyRenderer {
       fragmentShader: /* glsl */ `
         varying vec3 vColor;
         varying float vFlux;
-        void main() {
-          // Moffat-like PSF: ((1 + (r/α)²)^-β) with β = 2.5.
-          vec2 p = (gl_PointCoord - vec2(0.5)) * 2.0; // p in [-1, 1]
+        varying float vDispersion;
+        // Moffat-profile core+halo+glare evaluated at offset gl_PointCoord. Used
+        // per channel so chromatic dispersion can shift each color separately.
+        float psfIntensity(vec2 p, float bright) {
           float r2 = dot(p, p);
           float core = pow(1.0 + r2 / 0.06, -2.5);
-          // Per-star halo strength scales with flux — very bright stars (Vega,
-          // Sirius) get a visibly larger soft glow because the human iris
-          // diffracts more light around bright point sources.
-          float bright = smoothstep(0.4, 1.5, vFlux); // 0..1 for "naked-eye bright"
           float halo = (0.18 + 0.35 * bright) * exp(-r2 * (6.0 - 4.0 * bright));
-          // Adaptation glare: a wider, dimmer second halo that's only visible
-          // for the brightest 4-5 stars in the sky. Mimics the iris-scatter
-          // pattern that makes Vega/Sirius read as "more star-like" than a
-          // simple point would.
           float glare = bright * 0.06 * exp(-r2 * 1.2);
-          float intensity = clamp(core + halo + glare, 0.0, 1.4);
-          float alpha = intensity * clamp(vFlux, 0.0, 4.0);
+          return clamp(core + halo + glare, 0.0, 1.4);
+        }
+        void main() {
+          vec2 p = (gl_PointCoord - vec2(0.5)) * 2.0; // p in [-1, 1]
+          float bright = smoothstep(0.4, 1.5, vFlux);
+          // Atmospheric chromatic dispersion: blue lifted higher than red by
+          // differential refraction. The split is along screen-Y (which is
+          // roughly aligned with the zenith direction for any reasonable camera
+          // pose). Magnitude grows with vDispersion (set per-star from altitude
+          // and brightness). Tiny offsets — at the upper bound (~0.18) it's
+          // perceptible but doesn't shatter the point.
+          float disp = vDispersion * 0.18;
+          float iR, iG, iB;
+          if (disp < 0.005) {
+            // No dispersion → single PSF eval, no overhead.
+            float i = psfIntensity(p, bright);
+            iR = i; iG = i; iB = i;
+          } else {
+            // Sample R below, G centered, B above.
+            iR = psfIntensity(p + vec2(0.0, -disp), bright);
+            iG = psfIntensity(p, bright);
+            iB = psfIntensity(p + vec2(0.0,  disp), bright);
+          }
+          // Use channel-specific intensity but the per-star color tint.
+          vec3 rgb = vec3(vColor.r * iR, vColor.g * iG, vColor.b * iB);
+          // Single alpha — pick the max of the three so the bounding-disc
+          // remains visible while the channel offsets create the color split.
+          float alpha = max(max(iR, iG), iB) * clamp(vFlux, 0.0, 4.0);
           if (alpha < 0.002) discard;
-          gl_FragColor = vec4(vColor * intensity, alpha);
+          gl_FragColor = vec4(rgb, alpha);
         }
       `,
     });
@@ -636,6 +682,7 @@ export class SkyRenderer {
     this.updateMilkyWay(observer, date, sunAltDeg);
     this.updateSun(sunAa);
     this.updateDSO(observer, date, sunAltDeg);
+    this.updateAurora(observer);
     this.updateSkyBackground();
   }
 
@@ -698,6 +745,136 @@ export class SkyRenderer {
   }
 
   /**
+   * Build the auroral curtain mesh: an inside-out sphere whose fragment shader
+   * generates greenish 557.7 nm-ish vertical bands above a "magnetic-north
+   * horizon" direction. The shader writes nothing when intensity ≈ 0, so this
+   * is free for low-latitude / quiet-Kp observers.
+   */
+  private buildAurora(): void {
+    const radius = SKY_RADIUS * 0.97; // sit just outside the moon-glow sphere
+    const geom = new THREE.SphereGeometry(radius, 64, 32);
+    geom.scale(-1, 1, 1);
+    const mat = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      uniforms: {
+        uMagNorth: { value: new THREE.Vector3(0, 0, -1) }, // direction in world
+        uPeakAlt: { value: 0 },
+        uIntensity: { value: 0 },
+        uTime: { value: 0 },
+      },
+      vertexShader: /* glsl */ `
+        varying vec3 vWorldDir;
+        void main() {
+          vWorldDir = (modelMatrix * vec4(position, 1.0)).xyz;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        precision highp float;
+        varying vec3 vWorldDir;
+        uniform vec3 uMagNorth;
+        uniform float uPeakAlt;
+        uniform float uIntensity;
+        uniform float uTime;
+
+        float hash(vec2 p) {
+          return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+        }
+        float vnoise(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          float a = hash(i);
+          float b = hash(i + vec2(1.0, 0.0));
+          float c = hash(i + vec2(0.0, 1.0));
+          float d = hash(i + vec2(1.0, 1.0));
+          vec2 u = f * f * (3.0 - 2.0 * f);
+          return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
+        }
+
+        void main() {
+          if (uIntensity < 0.01) discard;
+          vec3 d = normalize(vWorldDir);
+          float altSin = d.y;
+          float altDeg = degrees(asin(clamp(altSin, -1.0, 1.0)));
+
+          // Below horizon → nothing.
+          if (altDeg < 0.0) discard;
+
+          // Azimuth proximity to magnetic-north direction.
+          vec3 magN = normalize(uMagNorth);
+          // Horizontal projections of d and magN (zero out the up component).
+          vec3 dh = normalize(vec3(d.x, 0.0, d.z));
+          vec3 mh = normalize(vec3(magN.x, 0.0, magN.z));
+          float cosAzDelta = clamp(dot(dh, mh), -1.0, 1.0);
+          float azDeltaDeg = degrees(acos(cosAzDelta));
+
+          // Curtain horizontal extent: ±60° from magnetic north.
+          if (azDeltaDeg > 70.0) discard;
+          float azFade = smoothstep(70.0, 35.0, azDeltaDeg);
+
+          // Vertical envelope centered on peak altitude.
+          // Gaussian-ish: stronger in a band, falling above and below.
+          float altDelta = altDeg - uPeakAlt;
+          float altShape = exp(-pow(altDelta / 12.0, 2.0));
+
+          // Animated curtain ripple via low-frequency noise along an
+          // azimuth-aligned coordinate. Aurora flickers visibly on ~1s scale.
+          float band = vnoise(vec2(azDeltaDeg * 0.18 + uTime * 0.3,
+                                    altDeg * 0.35 - uTime * 0.1));
+          float ripple = 0.6 + 0.4 * band;
+
+          // Vertical striations (the "curtain" texture).
+          float stripe = vnoise(vec2(azDeltaDeg * 0.6, altDeg * 0.2)) * 0.5 + 0.5;
+
+          // Color: O 557.7 nm green-yellow core with a faint magenta-pink
+          // hem at the upper edge (N₂ 630 nm emission). Mix toward pink as
+          // altDelta increases.
+          float pinkMix = clamp((altDelta) / 25.0, 0.0, 1.0);
+          vec3 greenCore = vec3(0.25, 0.95, 0.50);
+          vec3 pinkHem = vec3(0.95, 0.55, 0.85);
+          vec3 col = mix(greenCore, pinkHem, pinkMix);
+
+          float a = uIntensity * azFade * altShape * ripple * stripe * 0.7;
+          if (a < 0.003) discard;
+          gl_FragColor = vec4(col * (0.7 + 0.3 * stripe), a);
+        }
+      `,
+    });
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.renderOrder = -6; // above the sky-glow sphere, below stars
+    this.scene.add(mesh);
+    this.auroraMaterial = mat;
+  }
+
+  /**
+   * Update aurora uniforms from current observer + Kp. Called from setSky();
+   * the per-frame `uTime` is bumped in render() so the curtain flickers.
+   */
+  private updateAurora(observer: Observer): void {
+    if (!this.auroraMaterial) return;
+    const vis = auroralVisibility(observer, this.state.kp);
+    if (!vis.visible || vis.intensity < 0.02) {
+      this.auroraMaterial.uniforms["uIntensity"]!.value = 0;
+      return;
+    }
+    // Convert (peak alt, magnetic-north azimuth) → world direction vector.
+    const [x, y, z] = altAzToVector(vis.peakAltDeg, vis.magNorthAzDeg);
+    this.auroraMaterial.uniforms["uMagNorth"]!.value.set(x, y, z);
+    this.auroraMaterial.uniforms["uPeakAlt"]!.value = vis.peakAltDeg;
+    // Aurora is washed out by twilight + Bortle, same as Milky Way.
+    let twilightDamp: number;
+    if (this.currentSunAltDeg <= -18) twilightDamp = 1;
+    else if (this.currentSunAltDeg >= 0) twilightDamp = 0;
+    else twilightDamp = (this.currentSunAltDeg + 18) / 18;
+    const bortleNorm = Math.max(0, Math.min(1, (this.state.bortle - 1) / 8));
+    const bortleDamp = 1 - bortleNorm * 0.85;
+    this.auroraMaterial.uniforms["uIntensity"]!.value =
+      vis.intensity * twilightDamp * bortleDamp;
+  }
+
+  /**
    * Render the curated naked-eye DSO catalog (Andromeda, Orion Neb, Pleiades,
    * Beehive, Double Cluster, Hyades, Magellanic Clouds, …) as soft elliptical
    * patches sized to their real angular extent. Visibility scales with Bortle
@@ -723,8 +900,15 @@ export class SkyRenderer {
 
     // Above this twilight threshold the eye can't pick out diffuse DSOs.
     if (sunAltDeg > -8) return;
-    // Bortle ≥ 7 → suburban-city skies wash out everything fainter than M45.
-    const limitForDSO = this.state.bortle >= 7 ? 2.0 : this.state.bortle >= 5 ? 4.0 : 6.0;
+    // Per-Bortle naked-eye DSO limit. At Bortle 1 a dark-adapted observer can
+    // see Veil and M81 fuzz; by Bortle 5 only the showpieces (M31, M45, M44)
+    // remain; in city sky (Bortle 7+) only M45 is anything more than a star.
+    const limitForDSO =
+      this.state.bortle <= 1 ? 9.0 :
+      this.state.bortle <= 2 ? 7.0 :
+      this.state.bortle <= 4 ? 6.0 :
+      this.state.bortle <= 6 ? 4.0 :
+      2.0;
 
     const group = new THREE.Group();
     for (const dso of NAKED_EYE_DSO) {
@@ -1494,12 +1678,17 @@ export class SkyRenderer {
   private lastSatRefreshMs = 0;
 
   render(): void {
+    const tSec = performance.now() / 1000;
     // Drive the per-star twinkle modulation (in seconds, fractional).
     if (this.starPoints) {
       const m = this.starPoints.material as THREE.ShaderMaterial;
       if (m.uniforms["uTime"]) {
-        m.uniforms["uTime"]!.value = performance.now() / 1000;
+        m.uniforms["uTime"]!.value = tSec;
       }
+    }
+    // Aurora curtain flickers continuously even between setSky() calls.
+    if (this.auroraMaterial && this.auroraMaterial.uniforms["uTime"]) {
+      this.auroraMaterial.uniforms["uTime"]!.value = tSec;
     }
     // Refresh satellites once per second — ISS moves ~4°/min, so 1 Hz is plenty
     // for the eye to read smooth motion while keeping SGP4 cost negligible.
