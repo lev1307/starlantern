@@ -14,6 +14,7 @@ import {
   twilightSkyMag,
   skyMagToLimitMag,
   effectiveLimitMag,
+  chromaticExtinction,
 } from "../src/astrophysics";
 
 describe("bvToTeff (Ballesteros 2012 fit)", () => {
@@ -251,5 +252,38 @@ describe("effectiveLimitMag", () => {
 
   it("daylight → very negative (effectively nothing visible)", () => {
     expect(effectiveLimitMag(1, 30)).toBeLessThan(0);
+  });
+});
+
+describe("chromaticExtinction — wavelength-dependent atmospheric reddening", () => {
+  it("at zenith all channels transmit ~equally and close to 1", () => {
+    const [r, g, b] = chromaticExtinction(89);
+    expect(r).toBeGreaterThan(0.7);
+    expect(g).toBeGreaterThan(0.7);
+    expect(b).toBeGreaterThan(0.6);
+    // R passes more light than B because blue scatters more — even at zenith.
+    expect(r).toBeGreaterThan(b);
+  });
+
+  it("at altitude 10° blue is dimmed dramatically more than red", () => {
+    const [r, g, b] = chromaticExtinction(10);
+    expect(r).toBeGreaterThan(b * 1.5);
+    expect(r).toBeGreaterThan(g);
+    expect(g).toBeGreaterThan(b);
+  });
+
+  it("below horizon returns zero transmission on all channels", () => {
+    const [r, g, b] = chromaticExtinction(-5);
+    expect(r).toBe(0);
+    expect(g).toBe(0);
+    expect(b).toBe(0);
+  });
+
+  it("each channel transmission is monotonic in altitude", () => {
+    const lo = chromaticExtinction(5);
+    const hi = chromaticExtinction(80);
+    expect(hi[0]).toBeGreaterThan(lo[0]);
+    expect(hi[1]).toBeGreaterThan(lo[1]);
+    expect(hi[2]).toBeGreaterThan(lo[2]);
   });
 });

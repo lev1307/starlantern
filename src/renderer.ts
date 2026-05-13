@@ -22,6 +22,8 @@ import {
   scintillationAmplitude,
   effectiveLimitMag,
   twilightSkyMag,
+  chromaticExtinction,
+  airmass,
 } from "./astrophysics";
 import { moonPosition, sunPosition } from "./moon";
 import { allPlanetPositions } from "./planets";
@@ -558,9 +560,20 @@ export class SkyRenderer {
       const NEUTRAL_R = 0.85;
       const NEUTRAL_G = 0.92;
       const NEUTRAL_B = 1.0;
-      colors[i * 3 + 0] = NEUTRAL_R + sat * (cr - NEUTRAL_R);
-      colors[i * 3 + 1] = NEUTRAL_G + sat * (cg - NEUTRAL_G);
-      colors[i * 3 + 2] = NEUTRAL_B + sat * (cb - NEUTRAL_B);
+      // Wavelength-dependent atmospheric extinction: blue is scattered more
+      // than red, so a star near the horizon reddens visibly. Per-channel
+      // multipliers ∈ (0, 1]; multiply after scotopic mixing so the existing
+      // PSF intensity already encodes the V-band total flux.
+      const [eR, eG, eB] = chromaticExtinction(altDeg);
+      // Normalise out the V-band part already baked into `flux` (we used
+      // extinctionMag at V-band above), keeping only the *color shift*.
+      const eV = altDeg > 0 ? Math.pow(10, -0.4 * 0.28 * airmass(altDeg)) : 1;
+      const mR = eR / Math.max(eV, 1e-6);
+      const mG = eG / Math.max(eV, 1e-6);
+      const mB = eB / Math.max(eV, 1e-6);
+      colors[i * 3 + 0] = (NEUTRAL_R + sat * (cr - NEUTRAL_R)) * mR;
+      colors[i * 3 + 1] = (NEUTRAL_G + sat * (cg - NEUTRAL_G)) * mG;
+      colors[i * 3 + 2] = (NEUTRAL_B + sat * (cb - NEUTRAL_B)) * mB;
     }
 
     this.starWorldPositions = positions;
@@ -1409,9 +1422,16 @@ export class SkyRenderer {
       // until you zoom; render at max(disc_radius, point-PSF_radius) so they
       // don't disappear under the planet shader.
       const angRad = (p.angularDiameterArcsec / 3600) * DEG;
-      const physRadius = Math.max(0.6, SKY_RADIUS * Math.tan(angRad / 2));
-
-      const geom = new THREE.CircleGeometry(physRadius, 32);
+      const discRadius = Math.max(0.6, SKY_RADIUS * Math.tan(angRad / 2));
+      // The quad has to be large enough to hold the diffraction spikes (only
+      // visible for very bright planets) plus the disc. Spike length scales
+      // with flux; we cap the quad at ~6× the disc and rely on the shader
+      // to do everything below that. `uDiscFrac` tells the shader what
+      // fraction of the quad is the actual planet disc.
+      const isVeryBright = p.mag < -2.5;
+      const quadRadius = isVeryBright ? discRadius * 5 : discRadius * 1.6;
+      const discFrac = discRadius / quadRadius;
+      const geom = new THREE.PlaneGeometry(quadRadius * 2, quadRadius * 2);
       const mat = new THREE.ShaderMaterial({
         transparent: true,
         depthWrite: false,
@@ -1421,6 +1441,7 @@ export class SkyRenderer {
             value: new THREE.Vector3(p.color[0], p.color[1], p.color[2]),
           },
           uFlux: { value: flux },
+          uDiscFrac: { value: discFrac },
         },
         vertexShader: /* glsl */ `
           varying vec2 vUv;
@@ -1430,16 +1451,42 @@ export class SkyRenderer {
           }
         `,
         fragmentShader: /* glsl */ `
+          precision highp float;
           varying vec2 vUv;
           uniform vec3 uColor;
           uniform float uFlux;
+          uniform float uDiscFrac;
           void main() {
-            float r2 = dot(vUv, vUv);
-            if (r2 > 1.0) discard;
-            // Sharper edge than a star PSF — planets are spatially resolved discs.
-            float core = pow(1.0 - r2, 1.5);
-            float halo = 0.25 * exp(-r2 * 4.0);
-            float intensity = clamp(core + halo, 0.0, 1.0);
+            // Disc-space coordinates: vUv was [-1,1] of the (possibly-oversized)
+            // quad; rescale so that |q|=1 is the planet's actual rim.
+            vec2 q = vUv / uDiscFrac;
+            float qr2 = dot(q, q);
+            float intensity = 0.0;
+            if (qr2 <= 1.0) {
+              // Sharper edge than a star PSF — planets are spatially resolved discs.
+              float core = pow(1.0 - qr2, 1.5);
+              float halo = 0.25 * exp(-qr2 * 4.0);
+              intensity = clamp(core + halo, 0.0, 1.0);
+            }
+            // Iris diffraction spikes for the very bright planets (Venus at
+            // mag -4, Jupiter at mag -2.5). The eye really does see a faint
+            // 4-point cross around them. Spike strength scales with flux,
+            // becomes invisible below mag ≈ -2.
+            float bright = smoothstep(2.0, 6.0, uFlux);
+            if (bright > 0.001) {
+              float ax = abs(vUv.x);
+              float ay = abs(vUv.y);
+              float spikeWidth = 0.02 + 0.02 * (1.0 - bright);
+              // Vertical bar at x≈0.
+              float vBar = exp(-pow(vUv.x / spikeWidth, 2.0));
+              // Horizontal bar at y≈0.
+              float hBar = exp(-pow(vUv.y / spikeWidth, 2.0));
+              // Length falloff along the bar.
+              float vLen = exp(-ay * 1.3);
+              float hLen = exp(-ax * 1.3);
+              float spike = bright * 0.4 * (vBar * vLen + hBar * hLen);
+              intensity += spike;
+            }
             float alpha = intensity * clamp(uFlux, 0.0, 8.0);
             if (alpha < 0.002) discard;
             gl_FragColor = vec4(uColor * intensity, alpha);

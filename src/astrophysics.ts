@@ -78,6 +78,39 @@ export function extinctionMag(altDeg: number, k = 0.28): number {
 }
 
 /**
+ * Wavelength-dependent (RGB-band) extinction coefficients in mag/airmass for
+ * a typical dark site at sea level. Values from Hayes & Latham 1975 fits to
+ * Palomar / La Silla photometry, rounded for the three sRGB primaries:
+ *   U/B band (≈ 440 nm)  → kB ≈ 0.40
+ *   V band   (≈ 550 nm)  → kV ≈ 0.28  (matches the default in extinctionMag)
+ *   R band   (≈ 700 nm)  → kR ≈ 0.16
+ *
+ * Why this matters perceptually: a star at altitude 5° is seen through
+ * ~10 airmasses; that's 4 mag of extra V dimming but ~6 mag of blue dimming
+ * vs ~2 mag of red. So Sirius rising looks orange-red, then yellow, then
+ * white-blue once it climbs. We compute per-channel extinction in magnitudes,
+ * convert to linear flux ratios, and the renderer applies them as a color
+ * multiplier on each star's tint.
+ */
+export const RGB_EXTINCTION_COEFF = { r: 0.16, g: 0.28, b: 0.40 };
+
+/**
+ * Per-channel linear-flux multipliers (relative to no atmosphere) at the
+ * given altitude. Use these to redden a star's color near the horizon.
+ * Returns [mR, mG, mB] each in [0, 1].
+ */
+export function chromaticExtinction(
+  altDeg: number,
+): [number, number, number] {
+  if (altDeg <= 0) return [0, 0, 0];
+  const X = airmass(altDeg);
+  const mr = Math.pow(10, -0.4 * RGB_EXTINCTION_COEFF.r * X);
+  const mg = Math.pow(10, -0.4 * RGB_EXTINCTION_COEFF.g * X);
+  const mb = Math.pow(10, -0.4 * RGB_EXTINCTION_COEFF.b * X);
+  return [mr, mg, mb];
+}
+
+/**
  * Atmospheric refraction lift, in degrees. Bennett 1982 fit, valid 0°-90°.
  *
  *   R(h_apparent) = 1 / tan(h_app + 7.31 / (h_app + 4.4))   [arcminutes]
