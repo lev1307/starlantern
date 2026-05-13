@@ -44,6 +44,11 @@ app.innerHTML = `
         <input id="exposure" type="range" min="0.2" max="3" step="0.05" value="1" />
         <span id="exposure-val">1.0×</span>
       </label>
+      <label>
+        Kp (aurora)
+        <input id="kp" type="range" min="0" max="9" step="0.1" value="3" />
+        <span id="kp-val">3.0</span>
+      </label>
       <details class="stereo-details">
         <summary>Stereo (headmount)</summary>
         <div class="btn-row">
@@ -186,6 +191,8 @@ const $bortle = document.getElementById("bortle") as HTMLInputElement;
 const $bortleVal = document.getElementById("bortle-val")!;
 const $exposure = document.getElementById("exposure") as HTMLInputElement;
 const $exposureVal = document.getElementById("exposure-val")!;
+const $kp = document.getElementById("kp") as HTMLInputElement;
+const $kpVal = document.getElementById("kp-val")!;
 
 function refreshSky(): void {
   const fix = sensors.getLocation();
@@ -233,6 +240,12 @@ $bortle.addEventListener("input", () => {
 $exposure.addEventListener("input", () => {
   renderer.state.exposure = parseFloat($exposure.value);
   $exposureVal.textContent = `${renderer.state.exposure.toFixed(2)}×`;
+  refreshSky();
+});
+
+$kp.addEventListener("input", () => {
+  renderer.state.kp = parseFloat($kp.value);
+  $kpVal.textContent = renderer.state.kp.toFixed(1);
   refreshSky();
 });
 
