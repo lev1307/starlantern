@@ -25,6 +25,7 @@ import {
 } from "./astrophysics";
 import { moonPosition, sunPosition } from "./moon";
 import { allPlanetPositions } from "./planets";
+import { visibleSatellites } from "./satellites";
 
 const SKY_RADIUS = 100; // arbitrary — stars on a unit sphere look the same at any radius
 const DEG = Math.PI / 180;
@@ -71,6 +72,9 @@ export class SkyRenderer {
   private milkyWayMesh: THREE.Mesh | null = null;
   private milkyWayMaterial: THREE.ShaderMaterial | null = null;
   private moonGlowMaterial: THREE.ShaderMaterial | null = null;
+  private satelliteGroup: THREE.Group | null = null;
+  /** Observer most recently passed to setSky(); used by per-frame satellite update. */
+  private lastObserver: Observer | null = null;
   /** Sun altitude at the most recent setSky() call (degrees, refraction-uncorrected). */
   private currentSunAltDeg = -90;
   /** Currently active catalog (defaults to the bright fallback; replaced by setCatalog()). */
@@ -386,11 +390,26 @@ export class SkyRenderer {
           // -- Light pollution horizon dome (altitude-dependent only) ----------
           float bortleNorm = clamp((uBortle - 1.0) / 8.0, 0.0, 1.0);
           if (bortleNorm > 0.0 && altSin > -0.05) {
-            // Dome that's strong near the horizon and fades quickly with altitude.
             float horizonProx = pow(1.0 - clamp(altSin, 0.0, 1.0), 3.0);
             float iLP = bortleNorm * horizonProx * 0.4;
-            // Urban sodium-vapour tint (warm orange-brown).
             total += vec3(0.55, 0.40, 0.18) * iLP;
+          }
+
+          // -- Air-glow ---------------------------------------------------------
+          // Faint chemiluminescent emission from O2 / OH in the upper atmosphere,
+          // present even at perfect dark sites (~mag 23 / arcsec² zenith). Reads
+          // greenish-yellow to the dark-adapted eye; brighter near horizon
+          // because the line of sight intercepts more emitting layer.
+          if (uTwilight < 0.2) {
+            float air = (1.0 - uTwilight * 5.0);
+            // sec(zenith angle) — capped — gives the path-length enhancement.
+            float secZ = 1.0 / max(altSin + 0.07, 0.07);
+            secZ = min(secZ, 6.0);
+            // Less air-glow at high Bortle — it's drowned by city light, not
+            // physically suppressed, but the eye can't pick it out.
+            float bortleSuppress = 1.0 - bortleNorm * 0.7;
+            float iAir = 0.011 * air * secZ * bortleSuppress;
+            total += vec3(0.18, 0.27, 0.20) * iAir;
           }
 
           gl_FragColor = vec4(total, 1.0);
@@ -419,6 +438,7 @@ export class SkyRenderer {
    * The fragment shader draws a Moffat-like soft PSF whose intensity is the per-star flux.
    */
   setSky(observer: Observer, date: Date): void {
+    this.lastObserver = observer;
     const catalog = this.catalog;
     const positions = new Float32Array(catalog.length * 3);
     const fluxes = new Float32Array(catalog.length);
@@ -547,13 +567,21 @@ export class SkyRenderer {
         varying vec3 vColor;
         varying float vFlux;
         void main() {
-          // Moffat-like PSF: ((1 + (r/α)²)^-β) with β = 2.5, α = 0.25 in point-coord units.
+          // Moffat-like PSF: ((1 + (r/α)²)^-β) with β = 2.5.
           vec2 p = (gl_PointCoord - vec2(0.5)) * 2.0; // p in [-1, 1]
           float r2 = dot(p, p);
           float core = pow(1.0 + r2 / 0.06, -2.5);
-          // Optional faint halo for bright stars (additive blending so this just glows).
-          float halo = 0.18 * exp(-r2 * 6.0);
-          float intensity = clamp(core + halo, 0.0, 1.0);
+          // Per-star halo strength scales with flux — very bright stars (Vega,
+          // Sirius) get a visibly larger soft glow because the human iris
+          // diffracts more light around bright point sources.
+          float bright = smoothstep(0.4, 1.5, vFlux); // 0..1 for "naked-eye bright"
+          float halo = (0.18 + 0.35 * bright) * exp(-r2 * (6.0 - 4.0 * bright));
+          // Adaptation glare: a wider, dimmer second halo that's only visible
+          // for the brightest 4-5 stars in the sky. Mimics the iris-scatter
+          // pattern that makes Vega/Sirius read as "more star-like" than a
+          // simple point would.
+          float glare = bright * 0.06 * exp(-r2 * 1.2);
+          float intensity = clamp(core + halo + glare, 0.0, 1.4);
           float alpha = intensity * clamp(vFlux, 0.0, 4.0);
           if (alpha < 0.002) discard;
           gl_FragColor = vec4(vColor * intensity, alpha);
@@ -568,6 +596,82 @@ export class SkyRenderer {
     this.updatePlanets(observer, date);
     this.updateMilkyWay(observer, date, sunAltDeg);
     this.updateSkyBackground();
+  }
+
+  /**
+   * Place the satellites visible right now (sunlit + above the horizon) as
+   * small bright points on the sky sphere. Called per frame from render()
+   * because ISS / CSS drift ~4°/min and the human eye sees that motion clearly.
+   */
+  updateSatellites(): void {
+    const observer = this.lastObserver;
+    if (!observer) return;
+    const date = new Date();
+    const sightings = visibleSatellites(observer, date);
+
+    if (this.satelliteGroup) {
+      this.scene.remove(this.satelliteGroup);
+      this.satelliteGroup.traverse((obj) => {
+        if (obj instanceof THREE.Mesh) {
+          obj.geometry.dispose();
+          (obj.material as THREE.Material).dispose();
+        }
+      });
+      this.satelliteGroup = null;
+    }
+    if (sightings.length === 0) return;
+
+    const group = new THREE.Group();
+    for (const sat of sightings) {
+      // Atmospheric refraction + extinction (use the same helpers as stars).
+      const altApp = sat.altDeg + refractionDeg(sat.altDeg);
+      const apparentMag = sat.mag + extinctionMag(sat.altDeg);
+      const flux = magToFlux(apparentMag) * this.state.exposure;
+      if (flux < 0.001) continue;
+
+      const geom = new THREE.CircleGeometry(0.5, 16);
+      const mat = new THREE.ShaderMaterial({
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        uniforms: {
+          uFlux: { value: flux },
+        },
+        vertexShader: /* glsl */ `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv * 2.0 - vec2(1.0);
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: /* glsl */ `
+          varying vec2 vUv;
+          uniform float uFlux;
+          void main() {
+            float r2 = dot(vUv, vUv);
+            if (r2 > 1.0) discard;
+            float core = pow(1.0 + r2 / 0.04, -2.5);
+            float halo = 0.25 * exp(-r2 * 6.0);
+            float intensity = clamp(core + halo, 0.0, 1.0);
+            float alpha = intensity * clamp(uFlux, 0.0, 6.0);
+            if (alpha < 0.002) discard;
+            // Solar panels are mostly silver-white with a slight yellow cast
+            // from the gold-tinted multi-layer insulation foil.
+            vec3 col = vec3(1.0, 0.97, 0.90) * intensity;
+            gl_FragColor = vec4(col, alpha);
+          }
+        `,
+      });
+      const mesh = new THREE.Mesh(geom, mat);
+      const [x, y, z] = altAzToVector(altApp, sat.azDeg);
+      mesh.position.set(x * SKY_RADIUS, y * SKY_RADIUS, z * SKY_RADIUS);
+      mesh.lookAt(0, 0, 0);
+      mesh.userData["name"] = sat.name;
+      mesh.userData["mag"] = sat.mag;
+      group.add(mesh);
+    }
+    this.scene.add(group);
+    this.satelliteGroup = group;
   }
 
   /**
@@ -1008,6 +1112,8 @@ export class SkyRenderer {
     return { name, angleDeg: angle };
   }
 
+  private lastSatRefreshMs = 0;
+
   render(): void {
     // Drive the per-star twinkle modulation (in seconds, fractional).
     if (this.starPoints) {
@@ -1015,6 +1121,13 @@ export class SkyRenderer {
       if (m.uniforms["uTime"]) {
         m.uniforms["uTime"]!.value = performance.now() / 1000;
       }
+    }
+    // Refresh satellites once per second — ISS moves ~4°/min, so 1 Hz is plenty
+    // for the eye to read smooth motion while keeping SGP4 cost negligible.
+    const now = performance.now();
+    if (now - this.lastSatRefreshMs > 1000) {
+      this.lastSatRefreshMs = now;
+      this.updateSatellites();
     }
     if (this.state.stereo.enabled) {
       this.renderStereo();

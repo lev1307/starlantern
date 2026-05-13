@@ -13,6 +13,7 @@ import { PlateSolver } from "./platesolve";
 import { OrientationEKF } from "./ekf";
 import type { Quat } from "./quaternion";
 import { loadStarCatalog } from "./catalog";
+import { loadSatellites, satelliteSnapshotInfo } from "./satellites";
 
 const app = document.getElementById("app");
 if (!app) throw new Error("No #app container found");
@@ -206,6 +207,20 @@ void (async () => {
       "[ar-night-sky] full catalog failed, using bright fallback",
       err,
     );
+  }
+})();
+
+// Load the satellite TLE snapshot in parallel. The renderer asks for visible
+// satellites every frame; until this resolves, the query returns [].
+void (async () => {
+  try {
+    await loadSatellites();
+    const info = satelliteSnapshotInfo();
+    console.info(
+      `[ar-night-sky] satellite TLEs loaded — ${info?.count ?? 0} tracked (snapshot ${info?.fetchedAt ?? "?"})`,
+    );
+  } catch (err) {
+    console.warn("[ar-night-sky] satellite TLE load failed", err);
   }
 })();
 
