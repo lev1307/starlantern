@@ -249,6 +249,25 @@ $kp.addEventListener("input", () => {
   refreshSky();
 });
 
+// Pull the live Kp from NOAA SWPC via /api/kp on load (and every 10 min while
+// the page stays open). Falls back silently to the slider default on failure.
+async function refreshLiveKp(): Promise<void> {
+  try {
+    const r = await fetch("/api/kp");
+    if (!r.ok) return;
+    const data = (await r.json()) as { kp?: number };
+    if (typeof data.kp !== "number" || !Number.isFinite(data.kp)) return;
+    renderer.state.kp = Math.max(0, Math.min(9, data.kp));
+    $kp.value = renderer.state.kp.toString();
+    $kpVal.textContent = `${renderer.state.kp.toFixed(1)} (live)`;
+    refreshSky();
+  } catch {
+    // Network errors are fine — slider default (Kp=3) still works.
+  }
+}
+refreshLiveKp();
+setInterval(refreshLiveKp, 10 * 60 * 1000);
+
 // --- Stereo / headmount calibration --------------------------------------
 const $vr = document.getElementById("vr-btn") as HTMLButtonElement;
 const $xr = document.getElementById("xr-btn") as HTMLButtonElement;
