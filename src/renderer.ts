@@ -26,6 +26,8 @@ import {
 import { moonPosition, sunPosition } from "./moon";
 import { allPlanetPositions } from "./planets";
 import { visibleSatellites } from "./satellites";
+import { NAKED_EYE_DSO, type NakedEyeDSO } from "./dso";
+import { sampleNewMeteors, type MeteorSpec } from "./meteors";
 
 const SKY_RADIUS = 100; // arbitrary — stars on a unit sphere look the same at any radius
 const DEG = Math.PI / 180;
@@ -73,6 +75,10 @@ export class SkyRenderer {
   private milkyWayMaterial: THREE.ShaderMaterial | null = null;
   private moonGlowMaterial: THREE.ShaderMaterial | null = null;
   private satelliteGroup: THREE.Group | null = null;
+  private dsoGroup: THREE.Group | null = null;
+  private meteorGroup: THREE.Group | null = null;
+  private activeMeteors: Array<{ spec: MeteorSpec; mesh: THREE.Mesh }> = [];
+  private lastMeteorSampleMs = 0;
   /** Observer most recently passed to setSky(); used by per-frame satellite update. */
   private lastObserver: Observer | null = null;
   /** Sun altitude at the most recent setSky() call (degrees, refraction-uncorrected). */
@@ -395,6 +401,39 @@ export class SkyRenderer {
             total += vec3(0.55, 0.40, 0.18) * iLP;
           }
 
+          // -- Belt of Venus + Earth's shadow ----------------------------------
+          // During civil twilight (sun -2° to -8°), the anti-solar horizon hosts
+          // two stacked bands: a pink-rose "Belt of Venus" (backscattered sunlight
+          // reddened by the lower atmosphere) sitting above a darker grey-blue
+          // "Earth's shadow" cast on the atmosphere itself. The band rises
+          // proportionally as the sun sinks lower — at sun = -2° the belt is
+          // 0-5° above the horizon, by sun = -8° it has lifted to ~8-15°.
+          if (uTwilight > 0.05 && uTwilight < 0.55) {
+            // Map twilight (0..1, with 1=day) → "civil-window" weight [0..1] that
+            // peaks at the most pronounced Belt-of-Venus moment.
+            // Civil twilight = sun in (-6°, 0°) → uTwilight in (0.667, 1.0).
+            // Belt of Venus is most striking just after sunset → uTwilight ~0.55.
+            float belt = 1.0 - abs(uTwilight - 0.45) / 0.25;
+            belt = clamp(belt, 0.0, 1.0);
+            // Anti-solar direction (opposite of uSunDir).
+            float antiSun = clamp(-dot(d, normalize(uSunDir)), -1.0, 1.0);
+            // The bands only appear opposite the sun (antiSun > ~0.3).
+            float antiBand = smoothstep(0.2, 0.8, antiSun);
+            // Altitude profile: shadow is 0-3° above horizon, belt 3-10°, fading by 15°.
+            float altDeg = asin(clamp(altSin, -1.0, 1.0)) * 57.2957795;
+            // Earth-shadow band (subtractive — darker than ambient): 0-3° alt.
+            float shadow = smoothstep(3.0, 0.0, altDeg) * smoothstep(0.0, 1.0, altDeg + 1.0);
+            // Belt-of-Venus band (additive pink): 3-10° alt.
+            float beltAlt = smoothstep(2.0, 5.0, altDeg) * smoothstep(15.0, 6.0, altDeg);
+            float iBelt = belt * antiBand * beltAlt * 0.18;
+            total += vec3(0.90, 0.55, 0.65) * iBelt;
+            // Earth's shadow is a slight blue-grey subtraction from the
+            // twilight gradient — we model it as a small darkening factor
+            // applied to the (already-accumulated) twilight contribution.
+            float iShadow = belt * antiBand * shadow * 0.35;
+            total *= (1.0 - iShadow);
+          }
+
           // -- Air-glow ---------------------------------------------------------
           // Faint chemiluminescent emission from O2 / OH in the upper atmosphere,
           // present even at perfect dark sites (~mag 23 / arcsec² zenith). Reads
@@ -596,6 +635,7 @@ export class SkyRenderer {
     this.updatePlanets(observer, date);
     this.updateMilkyWay(observer, date, sunAltDeg);
     this.updateSun(sunAa);
+    this.updateDSO(observer, date, sunAltDeg);
     this.updateSkyBackground();
   }
 
@@ -655,6 +695,115 @@ export class SkyRenderer {
     mesh.renderOrder = 5; // above stars but below HUD
     this.scene.add(mesh);
     this.sunMesh = mesh;
+  }
+
+  /**
+   * Render the curated naked-eye DSO catalog (Andromeda, Orion Neb, Pleiades,
+   * Beehive, Double Cluster, Hyades, Magellanic Clouds, …) as soft elliptical
+   * patches sized to their real angular extent. Visibility scales with Bortle
+   * and twilight the same way faint stars do — at Bortle 7 city sky none of
+   * these are eye-visible; under a dark sky M31 is an obvious oval and M42 is
+   * a noticeable fuzzy reddish star to the unaided eye.
+   */
+  private updateDSO(
+    observer: Observer,
+    date: Date,
+    sunAltDeg: number,
+  ): void {
+    if (this.dsoGroup) {
+      this.scene.remove(this.dsoGroup);
+      this.dsoGroup.traverse((obj) => {
+        if (obj instanceof THREE.Mesh) {
+          obj.geometry.dispose();
+          (obj.material as THREE.Material).dispose();
+        }
+      });
+      this.dsoGroup = null;
+    }
+
+    // Above this twilight threshold the eye can't pick out diffuse DSOs.
+    if (sunAltDeg > -8) return;
+    // Bortle ≥ 7 → suburban-city skies wash out everything fainter than M45.
+    const limitForDSO = this.state.bortle >= 7 ? 2.0 : this.state.bortle >= 5 ? 4.0 : 6.0;
+
+    const group = new THREE.Group();
+    for (const dso of NAKED_EYE_DSO) {
+      if (dso.mag > limitForDSO) continue;
+      const aa = equatorialToAltAz(dso.pos, observer, date);
+      if (aa.altDeg < 2) continue; // below 2° atmospheric extinction kills it
+
+      const altApp = aa.altDeg + refractionDeg(aa.altDeg);
+      const apparentMag = dso.mag + extinctionMag(aa.altDeg);
+      // Diffuse objects spread their light over a wide angular area; scale flux
+      // by 1/area to roughly model surface-brightness perception (the eye sees
+      // surface brightness, not integrated mag, for extended objects).
+      const areaDeg2 = Math.PI * (dso.majorDeg / 2) * (dso.minorDeg / 2);
+      const surfaceMag = apparentMag + 2.5 * Math.log10(Math.max(0.5, areaDeg2));
+      const flux = magToFlux(surfaceMag) * this.state.exposure * 8.0; // x8 lift makes them visible at all
+
+      const mesh = this.buildDSOPatch(dso, flux);
+      const [x, y, z] = altAzToVector(altApp, aa.azDeg);
+      mesh.position.set(x * SKY_RADIUS, y * SKY_RADIUS, z * SKY_RADIUS);
+      mesh.lookAt(0, 0, 0);
+      group.add(mesh);
+    }
+    if (group.children.length > 0) {
+      this.scene.add(group);
+      this.dsoGroup = group;
+    }
+  }
+
+  /** Build a single DSO patch mesh sized to the object's apparent angular extent. */
+  private buildDSOPatch(dso: NakedEyeDSO, flux: number): THREE.Mesh {
+    const radiusMajor = SKY_RADIUS * Math.tan((dso.majorDeg / 2) * DEG);
+    const radiusMinor = SKY_RADIUS * Math.tan((dso.minorDeg / 2) * DEG);
+    // Use a quad and let the shader do the elliptical gaussian.
+    const geom = new THREE.PlaneGeometry(radiusMajor * 2, radiusMinor * 2);
+    // Rotate the plane in its own frame so paDeg measures from "north" (up).
+    geom.rotateZ(dso.paDeg * DEG);
+
+    // Cluster vs galaxy/nebula give slightly different falloff profiles.
+    // Clusters: sharper core (many discrete stars), faster falloff.
+    // Galaxies/nebulae: broader gaussian.
+    const isCluster = dso.kind === "cluster";
+    const profileSharp = isCluster ? 4.0 : 2.0;
+
+    const mat = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      uniforms: {
+        uFlux: { value: flux },
+        uColor: { value: new THREE.Color(dso.color[0], dso.color[1], dso.color[2]) },
+        uSharp: { value: profileSharp },
+      },
+      vertexShader: /* glsl */ `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv * 2.0 - vec2(1.0);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        precision highp float;
+        varying vec2 vUv;
+        uniform float uFlux;
+        uniform vec3 uColor;
+        uniform float uSharp;
+        void main() {
+          float r2 = dot(vUv, vUv);
+          if (r2 > 1.0) discard;
+          // Gaussian-ish radial falloff; sharper for clusters.
+          float intensity = exp(-r2 * uSharp);
+          float alpha = intensity * clamp(uFlux, 0.0, 6.0);
+          if (alpha < 0.003) discard;
+          gl_FragColor = vec4(uColor * intensity, alpha);
+        }
+      `,
+    });
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.renderOrder = 1; // above MW background, below stars
+    return mesh;
   }
 
   /**
@@ -731,6 +880,150 @@ export class SkyRenderer {
     }
     this.scene.add(group);
     this.satelliteGroup = group;
+  }
+
+  /**
+   * Per-frame meteor management. Each frame we (1) sample any new meteors that
+   * "occurred" during the elapsed time, instantiating streaks for them, and
+   * (2) advance/age active meteors, fading them out and removing those past
+   * their duration. Streaks are short additive line segments — the eye sees
+   * meteors as bright transient streaks; a 0.5s exposure is essentially the
+   * full visual experience.
+   */
+  private tickMeteors(): void {
+    const observer = this.lastObserver;
+    if (!observer) return;
+    const date = new Date();
+    const nowMs = date.getTime();
+
+    // Sample new meteors based on time since last sample, capped at 1s of dt.
+    const dt = this.lastMeteorSampleMs > 0
+      ? Math.min(1.0, (nowMs - this.lastMeteorSampleMs) / 1000)
+      : 0.1;
+    this.lastMeteorSampleMs = nowMs;
+
+    // Skip when sun is up — meteors aren't naked-eye visible in daylight.
+    if (this.currentSunAltDeg > -6) {
+      // Still need to fade out any active meteors that crossed into twilight.
+    } else {
+      const specs = sampleNewMeteors(date, dt, observer);
+      for (const spec of specs) {
+        // Magnitude clamp: refuse to render meteors fainter than the Bortle limit + small slack.
+        const apparentMag = spec.mag + extinctionMag(Math.max(0, spec.startAlt));
+        const limit = effectiveLimitMag(this.state.bortle, this.currentSunAltDeg);
+        if (apparentMag > limit + 0.5) continue;
+        const mesh = this.buildMeteorMesh(spec);
+        if (mesh) {
+          if (!this.meteorGroup) {
+            this.meteorGroup = new THREE.Group();
+            this.scene.add(this.meteorGroup);
+          }
+          this.meteorGroup.add(mesh);
+          this.activeMeteors.push({ spec, mesh });
+        }
+      }
+    }
+
+    // Advance active meteors. Each meteor has its head sweep from start→end
+    // across its duration, with a glowing tail that fades over ~0.4s.
+    const keep: typeof this.activeMeteors = [];
+    for (const m of this.activeMeteors) {
+      const tSec = (nowMs - m.spec.startMs) / 1000;
+      const lifetime = m.spec.durationS + 0.4; // include tail fade
+      if (tSec > lifetime) {
+        if (this.meteorGroup) this.meteorGroup.remove(m.mesh);
+        m.mesh.geometry.dispose();
+        (m.mesh.material as THREE.Material).dispose();
+        continue;
+      }
+      const mat = m.mesh.material as THREE.ShaderMaterial;
+      mat.uniforms["uT"]!.value = tSec;
+      mat.uniforms["uDuration"]!.value = m.spec.durationS;
+      keep.push(m);
+    }
+    this.activeMeteors = keep;
+  }
+
+  /** Build a single-meteor streak mesh: a thin quad along the trajectory. */
+  private buildMeteorMesh(spec: MeteorSpec): THREE.Mesh | null {
+    const [sx, sy, sz] = altAzToVector(
+      spec.startAlt + refractionDeg(Math.max(0, spec.startAlt)),
+      spec.startAz,
+    );
+    const [ex, ey, ez] = altAzToVector(
+      spec.endAlt + refractionDeg(Math.max(0, spec.endAlt)),
+      spec.endAz,
+    );
+    const start = new THREE.Vector3(sx, sy, sz).multiplyScalar(SKY_RADIUS);
+    const end = new THREE.Vector3(ex, ey, ez).multiplyScalar(SKY_RADIUS);
+    const mid = start.clone().add(end).multiplyScalar(0.5);
+    const dir = end.clone().sub(start);
+    const len = dir.length();
+    if (len < 0.1) return null;
+    // Build a 2-tri quad aligned along the trajectory, ~0.3% of SKY_RADIUS wide.
+    const width = SKY_RADIUS * 0.004;
+    const geom = new THREE.PlaneGeometry(len, width);
+    const mesh = new THREE.Mesh(
+      geom,
+      new THREE.ShaderMaterial({
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        uniforms: {
+          uT: { value: 0 },
+          uDuration: { value: spec.durationS },
+          uFlux: {
+            value: Math.min(8, magToFlux(spec.mag) * this.state.exposure * 3),
+          },
+        },
+        vertexShader: /* glsl */ `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: /* glsl */ `
+          precision highp float;
+          varying vec2 vUv;
+          uniform float uT;
+          uniform float uDuration;
+          uniform float uFlux;
+          void main() {
+            // Head position along the streak (0→1 over duration).
+            float headProg = clamp(uT / max(uDuration, 0.01), 0.0, 1.0);
+            // Tail trails behind the head with exponential brightness falloff.
+            float distFromHead = headProg - vUv.x;
+            // Behind the head (distFromHead > 0) → visible tail.
+            // Ahead of the head (distFromHead < 0) → nothing.
+            if (distFromHead < -0.02 || distFromHead > 0.6) discard;
+            float tail = exp(-distFromHead * 8.0) * step(-0.02, distFromHead);
+            // Lateral falloff (across the width of the streak).
+            float lateral = exp(-pow((vUv.y - 0.5) * 6.0, 2.0));
+            // Post-duration fade: after the head reaches the end, dim everything.
+            float postFade = 1.0 - clamp((uT - uDuration) / 0.4, 0.0, 1.0);
+            float intensity = tail * lateral * postFade;
+            // Ablation color: hot at head (whitish-blue), cooler in tail (yellow-orange).
+            vec3 colorHead = vec3(0.85, 0.92, 1.0);
+            vec3 colorTail = vec3(1.0, 0.75, 0.40);
+            vec3 col = mix(colorHead, colorTail, clamp(distFromHead * 3.0, 0.0, 1.0));
+            float alpha = intensity * uFlux;
+            if (alpha < 0.003) discard;
+            gl_FragColor = vec4(col * intensity, alpha);
+          }
+        `,
+      }),
+    );
+    mesh.position.copy(mid);
+    // Orient the quad so its +X axis aligns with dir and it faces the camera (origin).
+    const xAxis = dir.clone().normalize();
+    const radial = mid.clone().normalize(); // outward from observer
+    const yAxis = radial.clone().cross(xAxis).normalize().negate();
+    const zAxis = xAxis.clone().cross(yAxis).normalize();
+    const basis = new THREE.Matrix4().makeBasis(xAxis, yAxis, zAxis);
+    mesh.quaternion.setFromRotationMatrix(basis);
+    mesh.renderOrder = 4;
+    return mesh;
   }
 
   /**
@@ -1215,6 +1508,7 @@ export class SkyRenderer {
       this.lastSatRefreshMs = now;
       this.updateSatellites();
     }
+    this.tickMeteors();
     if (this.state.stereo.enabled) {
       this.renderStereo();
     } else {
