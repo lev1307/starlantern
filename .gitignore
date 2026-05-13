@@ -41,3 +41,4 @@ data/cache/
 data/gaia_dr3/
 data/deep-sky/
 public/tiles/
+.claude/
