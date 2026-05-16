@@ -99,9 +99,9 @@ app.innerHTML = `
   <div id="overlay" class="overlay">
     <div class="overlay-inner">
       <h1>AR Night Sky</h1>
-      <p>Step 1 — WebXR base. Grant motion + location, then point your phone at the sky.</p>
+      <p>Point your phone at the night sky and see it as it would look under perfect dark conditions — every star, the Milky Way, planets, ISS, even meteors. Locked to reality via phone-camera plate-solving.</p>
       <button id="overlay-start" class="big-btn">Start</button>
-      <p class="tiny">Use outdoors away from metal for accurate heading. iOS will prompt for motion access; allow it.</p>
+      <p class="tiny">Use outdoors away from metal for accurate heading. iOS will ask for motion access; allow it.</p>
     </div>
   </div>
 `;
@@ -705,7 +705,13 @@ async function doLock(source: LockSource): Promise<void> {
       stack: err instanceof Error ? (err.stack ?? null) : null,
       total_ms: Math.round(performance.now() - tStart),
     });
-    $lockStatus.textContent = `failed: ${msg}`;
+    // Server-side ASTROMETRY_API_KEY missing → friendly message instead of raw 500.
+    if (/api[_ ]?key|ASTROMETRY|not configured|500|502/i.test(msg)) {
+      $lockStatus.textContent =
+        "plate-solve unavailable — astrometry.net API key not configured on the server (see docs/api-setup.md)";
+    } else {
+      $lockStatus.textContent = `failed: ${msg}`;
+    }
     console.error("Plate-solve failed", err);
   } finally {
     lockInFlight = false;
