@@ -466,15 +466,113 @@ $lock.addEventListener("click", async () => {
       ms: Math.round(performance.now() - tStart),
     });
 
+    // -- Stillness gate -------------------------------------------------
+    // Astrometry needs sharp star points. Motion blur during capture is the
+    // single biggest cause of solve failure. We poll the gyro until rotation
+    // rate magnitude has been below STILL_DPS for STILL_MS continuously,
+    // then proceed. On desktop preview / denied motion permission, we skip
+    // the gate (no gyro readings ever arrive).
+    //
+    // Threshold rationale (8-frame stack over ~250 ms at 60 ° FOV / 1920 px):
+    //   0.2 °/s → ≈ 2 px stack misregistration  (excellent)
+    //   0.5 °/s → ≈ 4 px                          (acceptable; threshold)
+    //   1   °/s → ≈ 8 px                          (centroids fuzzy)
+    //   2   °/s → ≈ 16 px streaks                 (abort post-capture)
+    const STILL_DPS = 0.5;
+    const STILL_MS = 600;
+    const STILL_TIMEOUT_MS = 8000;
+    $lockStatus.textContent = "hold still…";
+    track("platesolve.still_wait_begin", {
+      threshold_dps: STILL_DPS,
+      required_ms: STILL_MS,
+    });
+    const tStill0 = performance.now();
+    let stillSince: number | null = null;
+    let stillResult: "stable" | "timeout" | "no_gyro" = "stable";
+    let lastRateDps: number | null = null;
+    let firstGyroAt: number | null = null;
+    let lastStatusMs = 0;
+    while (true) {
+      const r = sensors.getRotationRate();
+      const now = performance.now();
+      if (r) {
+        if (firstGyroAt == null) firstGyroAt = now;
+        const rateDps = Math.hypot(r.alphaDps, r.betaDps, r.gammaDps);
+        lastRateDps = rateDps;
+        if (rateDps < STILL_DPS) {
+          if (stillSince == null) stillSince = now;
+          if (now - stillSince >= STILL_MS) break;
+        } else {
+          stillSince = null;
+        }
+        // Throttle the HUD update to ~4 Hz so it stays readable on the phone.
+        if (now - lastStatusMs > 250) {
+          lastStatusMs = now;
+          const heldFor = stillSince ? Math.round(now - stillSince) : 0;
+          $lockStatus.textContent = `hold still… ${heldFor}/${STILL_MS} ms (rate ${rateDps.toFixed(2)}°/s)`;
+        }
+      } else if (firstGyroAt == null && now - tStill0 > 1500) {
+        // No gyro reading after 1.5 s → desktop preview or motion denied.
+        // Skip the gate so the rest of the flow still works.
+        stillResult = "no_gyro";
+        break;
+      }
+      if (now - tStill0 > STILL_TIMEOUT_MS) {
+        stillResult = "timeout";
+        break;
+      }
+      await new Promise((res) => setTimeout(res, 50));
+    }
+    track("platesolve.still_wait_done", {
+      result: stillResult,
+      wait_ms: Math.round(performance.now() - tStill0),
+      last_rate_dps: lastRateDps,
+    });
+    if (stillResult === "timeout") {
+      $lockStatus.textContent =
+        "still-wait timed out — capturing anyway (may blur)";
+    }
+
+    // -- Capture with motion monitoring ---------------------------------
+    // Subscribe to rotation events for the duration of the capture so we
+    // can characterize whatever blur slipped through the gate.
+    let captureRotPeak = 0;
+    let captureRotSum = 0;
+    let captureRotN = 0;
+    const unsubscribeRot = sensors.onRotationRate((r) => {
+      const mag = Math.hypot(r.alphaDps, r.betaDps, r.gammaDps);
+      if (mag > captureRotPeak) captureRotPeak = mag;
+      captureRotSum += mag;
+      captureRotN += 1;
+    });
+
     $lockStatus.textContent = "capturing (stacking 8 frames)…";
     track("platesolve.capture_begin", { frames: 8 });
     const tCap = performance.now();
     const capture = await camera.grabStacked(8);
+    unsubscribeRot();
+    const captureRotMean = captureRotN > 0 ? captureRotSum / captureRotN : 0;
     track("platesolve.capture_done", {
       ms: Math.round(performance.now() - tCap),
       bytes: capture.blob.size,
       utc_ms: capture.utcMs,
+      rot_peak_dps: Math.round(captureRotPeak * 100) / 100,
+      rot_mean_dps: Math.round(captureRotMean * 100) / 100,
+      rot_samples: captureRotN,
     });
+
+    // Hard abort if peak motion exceeded the streak-threshold — astrometry
+    // will fail on this image, so don't waste a 20 s solve cycle on it.
+    const HARD_ABORT_DPS = 2.0;
+    if (captureRotPeak > HARD_ABORT_DPS) {
+      track("platesolve.aborted", {
+        reason: "motion_during_capture",
+        peak_dps: captureRotPeak,
+        mean_dps: captureRotMean,
+      });
+      $lockStatus.textContent = `moved too much during capture (peak ${captureRotPeak.toFixed(1)}°/s) — try again`;
+      return; // finally re-enables the button
+    }
 
     // Snapshot device pose at the moment of capture (best estimate).
     const qDevice = renderer.getDeviceQuaternion();
