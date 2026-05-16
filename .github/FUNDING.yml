@@ -1,0 +1,13 @@
+# Funding configuration — surfaces the "Sponsor" button on the GitHub repo page.
+#
+# Once your account is approved at https://github.com/sponsors and your
+# Ko-fi page exists, GitHub picks these up automatically. Until then the
+# button just doesn't show.
+#
+# Replace the placeholder usernames below with your real handles when
+# accounts are live.
+
+github: lev1307
+ko_fi: # set this to your ko-fi username when you create the page
+custom:
+  - https://ar-night-sky.vercel.app
