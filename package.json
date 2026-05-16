@@ -1,7 +1,7 @@
 {
-  "name": "ar-night-sky",
+  "name": "starlantern",
   "version": "0.0.1",
-  "description": "WebXR night-sky overlay locked to reality via phone-camera plate-solving. Prototype for AR-glasses astronomy.",
+  "description": "Starlantern — WebXR night-sky overlay locked to reality via phone-camera plate-solving. Prototype for AR-glasses astronomy.",
   "type": "module",
   "license": "AGPL-3.0-only",
   "private": false,
@@ -14,7 +14,8 @@
     "lint": "tsc --noEmit",
     "format": "prettier --write \"src/**/*.{ts,tsx,js,jsx,json,md}\"",
     "gen-catalog": "node scripts/build-catalog.mjs",
-    "gen-tle": "node scripts/build-tle.mjs"
+    "gen-tle": "node scripts/build-tle.mjs",
+    "tunnel": "npx -y cloudflared tunnel --url http://localhost:5173"
   },
   "dependencies": {
     "satellite.js": "^5.0.0",
@@ -33,9 +34,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/<owner>/ar-night-sky.git"
+    "url": "https://github.com/<owner>/starlantern.git"
   },
+  "homepage": "https://starlantern.app",
   "keywords": [
+    "starlantern",
     "ar",
     "augmented-reality",
     "astronomy",

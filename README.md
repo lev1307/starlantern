@@ -1,8 +1,8 @@
-# AR Night Sky
+# Starlantern
 
-> Working name — repo can be renamed later via GitHub UI without breaking links.
+> A WebXR night-sky overlay that turns your phone into a window onto a Bortle-1 sky — no matter where you actually are.
 
-A WebXR-based night-sky overlay that locks to reality via phone-camera plate-solving and renders an idealized dark-sky view (mag ≤ 6.5) with physically motivated colors, atmospheric extinction, and Bortle-aware brightness compensation. The phone version is a prototype for the eventual AR-glasses experience (Xreal / Viture / Rokid).
+Locks to reality via phone-camera plate-solving and renders an idealized dark-sky view (mag ≤ 6.5) with physically motivated colors, atmospheric extinction, and Bortle-aware brightness compensation. The phone version is a prototype for the eventual AR-glasses experience (Xreal / Viture / Rokid).
 
 ## Status
 
@@ -22,8 +22,8 @@ TypeScript · Three.js · WebXR · WebGL2 · Vite. Browser-only, runs on a phone
 ## Build from source
 
 ```bash
-git clone https://github.com/<owner>/ar-night-sky.git
-cd ar-night-sky
+git clone https://github.com/<owner>/starlantern.git
+cd starlantern
 npm install
 npm run dev
 ```
@@ -36,7 +36,7 @@ Then open the dev URL on your phone (same Wi-Fi as your laptop). Grant IMU + GPS
 
 You can build, run, modify, and redistribute this code freely under the AGPL terms. If you use it in a commercial product (especially as a hosted service) the AGPL requires you to either open-source your derivative or obtain a commercial license.
 
-**Commercial license** for proprietary use (no AGPL obligations): contact `lev13072006@gmail.com` *(temporary contact email — will move to a project domain later)*.
+**Commercial license** for proprietary use (no AGPL obligations): contact `hello@starlantern.app`.
 
 ## Contributing
 
