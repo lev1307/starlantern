@@ -98,10 +98,11 @@ app.innerHTML = `
   </div>
   <div id="overlay" class="overlay">
     <div class="overlay-inner">
-      <h1>AR Night Sky</h1>
+      <h1>Starlantern</h1>
       <p>Point your phone at the night sky and see it as it would look under perfect dark conditions — every star, the Milky Way, planets, ISS, even meteors. Locked to reality via phone-camera plate-solving.</p>
       <button id="overlay-start" class="big-btn">Start</button>
       <p class="tiny">Use outdoors away from metal for accurate heading. iOS will ask for motion access; allow it.</p>
+      <p class="tiny support-line">Free + AGPL-licensed. <a href="https://ko-fi.com/lev1307" target="_blank" rel="noopener">Support development</a> if you like it.</p>
     </div>
   </div>
 `;
@@ -155,6 +156,9 @@ style.textContent = `
     background: #88aaff; color: #000; border: none; border-radius: 8px;
   }
   .tiny { opacity: 0.4; font-size: 0.8rem; }
+  .support-line { margin-top: 0.4rem; opacity: 0.55; }
+  .support-line a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+  .support-line a:hover { opacity: 0.9; }
 `;
 document.head.appendChild(style);
 
