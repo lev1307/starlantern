@@ -42,3 +42,6 @@ data/gaia_dr3/
 data/deep-sky/
 public/tiles/
 .claude/
+
+# Field-test telemetry JSONL captures (one file per `npm run dev` session)
+logs/

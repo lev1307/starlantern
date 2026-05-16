@@ -14,9 +14,13 @@ import { OrientationEKF } from "./ekf";
 import type { Quat } from "./quaternion";
 import { loadStarCatalog } from "./catalog";
 import { loadSatellites, satelliteSnapshotInfo } from "./satellites";
+import { getSessionId, track, trackBoot } from "./telemetry";
 
 const app = document.getElementById("app");
 if (!app) throw new Error("No #app container found");
+
+// Boot beacon — first thing in the log so we can grep "did the page even load?"
+trackBoot();
 
 // --- Layout ---------------------------------------------------------------
 app.innerHTML = `
@@ -185,6 +189,7 @@ let lastMotionTMs: number | null = null;
 $offset.addEventListener("input", () => {
   renderer.state.headingOffsetDeg = parseFloat($offset.value);
   $offsetVal.textContent = `${renderer.state.headingOffsetDeg.toFixed(1)}°`;
+  track("slider.offset", { value: renderer.state.headingOffsetDeg });
 });
 
 const $bortle = document.getElementById("bortle") as HTMLInputElement;
@@ -235,18 +240,21 @@ $bortle.addEventListener("input", () => {
   renderer.state.bortle = parseFloat($bortle.value);
   $bortleVal.textContent = `${renderer.state.bortle.toFixed(0)}`;
   refreshSky();
+  track("slider.bortle", { value: renderer.state.bortle });
 });
 
 $exposure.addEventListener("input", () => {
   renderer.state.exposure = parseFloat($exposure.value);
   $exposureVal.textContent = `${renderer.state.exposure.toFixed(2)}×`;
   refreshSky();
+  track("slider.exposure", { value: renderer.state.exposure });
 });
 
 $kp.addEventListener("input", () => {
   renderer.state.kp = parseFloat($kp.value);
   $kpVal.textContent = renderer.state.kp.toFixed(1);
   refreshSky();
+  track("slider.kp", { value: renderer.state.kp, source: "user" });
 });
 
 // Pull the live Kp from NOAA SWPC via /api/kp on load (and every 10 min while
@@ -254,14 +262,24 @@ $kp.addEventListener("input", () => {
 async function refreshLiveKp(): Promise<void> {
   try {
     const r = await fetch("/api/kp");
-    if (!r.ok) return;
+    if (!r.ok) {
+      track("kp.fetch_failed", { status: r.status });
+      return;
+    }
     const data = (await r.json()) as { kp?: number };
-    if (typeof data.kp !== "number" || !Number.isFinite(data.kp)) return;
+    if (typeof data.kp !== "number" || !Number.isFinite(data.kp)) {
+      track("kp.fetch_bad_data", { data });
+      return;
+    }
     renderer.state.kp = Math.max(0, Math.min(9, data.kp));
     $kp.value = renderer.state.kp.toString();
     $kpVal.textContent = `${renderer.state.kp.toFixed(1)} (live)`;
     refreshSky();
-  } catch {
+    track("kp.live", { value: renderer.state.kp });
+  } catch (err) {
+    track("kp.fetch_exception", {
+      message: err instanceof Error ? err.message : String(err),
+    });
     // Network errors are fine — slider default (Kp=3) still works.
   }
 }
@@ -284,6 +302,7 @@ $vr.addEventListener("click", () => {
   const s = renderer.state.stereo;
   s.enabled = !s.enabled;
   $vr.textContent = s.enabled ? "Exit stereo" : "Enter stereo";
+  track("stereo.toggle", { enabled: s.enabled });
   // Side-by-side stereo on phones really wants landscape + fullscreen. Best-effort.
   if (s.enabled && document.fullscreenEnabled && !document.fullscreenElement) {
     void document.documentElement.requestFullscreen?.().catch(() => {});
@@ -294,10 +313,15 @@ $xr.addEventListener("click", async () => {
   $xr.disabled = true;
   const prev = $xr.textContent;
   $xr.textContent = "trying…";
+  track("webxr.attempt");
   try {
     const ok = await renderer.tryEnterImmersiveVr();
+    track("webxr.result", { ok });
     $xr.textContent = ok ? "WebXR active" : "no WebXR";
-  } catch {
+  } catch (err) {
+    track("webxr.error", {
+      message: err instanceof Error ? err.message : String(err),
+    });
     $xr.textContent = "no WebXR";
   } finally {
     setTimeout(() => {
@@ -310,18 +334,22 @@ $xr.addEventListener("click", async () => {
 $ipd.addEventListener("input", () => {
   renderer.state.stereo.ipdM = parseFloat($ipd.value) / 1000;
   $ipdVal.textContent = parseFloat($ipd.value).toFixed(1);
+  track("slider.ipd", { value_mm: parseFloat($ipd.value) });
 });
 $k1.addEventListener("input", () => {
   renderer.state.stereo.k1 = parseFloat($k1.value);
   $k1Val.textContent = renderer.state.stereo.k1.toFixed(2);
+  track("slider.k1", { value: renderer.state.stereo.k1 });
 });
 $k2.addEventListener("input", () => {
   renderer.state.stereo.k2 = parseFloat($k2.value);
   $k2Val.textContent = renderer.state.stereo.k2.toFixed(3);
+  track("slider.k2", { value: renderer.state.stereo.k2 });
 });
 $chroma.addEventListener("input", () => {
   renderer.state.stereo.chromatic = parseFloat($chroma.value);
   $chromaVal.textContent = renderer.state.stereo.chromatic.toFixed(3);
+  track("slider.chroma", { value: renderer.state.stereo.chromatic });
 });
 
 let latestOrientation: { a: number; b: number; g: number } | null = null;
@@ -360,10 +388,14 @@ sensors.onRotationRate((r) => {
 });
 
 async function start(): Promise<void> {
+  track("start.invoked", {
+    requires_ios_permission: sensors.requiresOrientationPermission,
+  });
   $overlay.style.display = "none";
 
   // Orientation permission (iOS prompts; everyone else auto-grants).
   const orientResult = await sensors.requestOrientationPermission();
+  track("permission.orientation", { result: orientResult });
   if (orientResult !== "granted") {
     alert("Motion sensor access denied. Use mouse drag on desktop.");
   }
@@ -371,6 +403,7 @@ async function start(): Promise<void> {
   // DeviceMotion: provides angular velocity (rotationRate). Used by the EKF
   // predict step for continuous drift correction between plate-solves.
   const motionResult = await sensors.requestMotionPermission();
+  track("permission.motion", { result: motionResult });
   if (motionResult === "granted") {
     ekfActive = true;
     $ekfStatus.textContent = "active (predict-only until first absolute fix)";
@@ -381,8 +414,20 @@ async function start(): Promise<void> {
   // Best-effort location fix. Falls back to a sensible default if denied.
   try {
     const fix = await sensors.requestLocation();
+    track("permission.geolocation", {
+      result: "granted",
+      lat: fix.latDeg,
+      lon: fix.lonDeg,
+      accuracy_m: fix.accuracyM,
+      alt_m: fix.altM,
+    });
     renderer.setSky({ latDeg: fix.latDeg, lonDeg: fix.lonDeg }, new Date());
-  } catch {
+  } catch (err) {
+    track("permission.geolocation", {
+      result: "denied_or_failed",
+      message: err instanceof Error ? err.message : String(err),
+      fallback: "Munich (TUM)",
+    });
     // Default: Munich (TUM, where the founder is). Manual override available.
     sensors.setManualLocation(48.1486, 11.5675, 520);
     renderer.setSky({ latDeg: 48.1486, lonDeg: 11.5675 }, new Date());
@@ -405,33 +450,63 @@ $overlayStart.addEventListener("click", () => void start());
 $lock.addEventListener("click", async () => {
   const fix = sensors.getLocation();
   if (!fix) {
+    track("platesolve.aborted", { reason: "no_location" });
     alert("Need a location fix first — grant GPS or use manual location.");
     return;
   }
   $lock.disabled = true;
   const prevLabel = $lock.textContent;
+  const tStart = performance.now();
+  track("platesolve.start", { lat: fix.latDeg, lon: fix.lonDeg });
   try {
     $lockStatus.textContent = "opening camera…";
+    track("platesolve.camera_open_begin");
     await camera.open();
+    track("platesolve.camera_open_done", {
+      ms: Math.round(performance.now() - tStart),
+    });
 
     $lockStatus.textContent = "capturing (stacking 8 frames)…";
+    track("platesolve.capture_begin", { frames: 8 });
+    const tCap = performance.now();
     const capture = await camera.grabStacked(8);
+    track("platesolve.capture_done", {
+      ms: Math.round(performance.now() - tCap),
+      bytes: capture.blob.size,
+      utc_ms: capture.utcMs,
+    });
 
     // Snapshot device pose at the moment of capture (best estimate).
     const qDevice = renderer.getDeviceQuaternion();
 
     $lockStatus.textContent = "uploading…";
+    const tSolve = performance.now();
     const result = await solver.solve(
       capture.blob,
       { latDeg: fix.latDeg, lonDeg: fix.lonDeg },
       capture.utcMs,
       (s) => {
         $lockStatus.textContent = `${s}…`;
+        track("platesolve.progress", {
+          state: s,
+          ms: Math.round(performance.now() - tSolve),
+        });
       },
     );
 
     renderer.applyLock(result.qCameraWorld, qDevice);
     lockTimeMs = Date.now();
+    track("platesolve.success", {
+      total_ms: Math.round(performance.now() - tStart),
+      solve_ms: Math.round(performance.now() - tSolve),
+      ra: result.calibration.ra,
+      dec: result.calibration.dec,
+      radius: result.calibration.radius,
+      pixscale: result.calibration.pixscale,
+      orientation: result.calibration.orientation,
+      parity: result.calibration.parity,
+      fov_deg: result.fovDeg,
+    });
     $lockStatus.textContent = `LOCKED — RA ${result.calibration.ra.toFixed(2)}°, Dec ${result.calibration.dec.toFixed(2)}°`;
     $unlock.disabled = false;
     // Feed the plate-solve into the EKF as a high-precision absolute update.
@@ -441,9 +516,15 @@ $lock.addEventListener("click", async () => {
       // Switch camera source to EKF — continuous drift correction from here on.
       renderer.cameraSource = "ekf";
       $ekfStatus.textContent = "locked (plate-solve fix injected)";
+      track("ekf.fix_injected", { sigma_rad: 5e-5 });
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    track("platesolve.failure", {
+      message: msg,
+      stack: err instanceof Error ? (err.stack ?? null) : null,
+      total_ms: Math.round(performance.now() - tStart),
+    });
     $lockStatus.textContent = `failed: ${msg}`;
     console.error("Plate-solve failed", err);
   } finally {
@@ -461,21 +542,83 @@ $unlock.addEventListener("click", () => {
   $lockStatus.textContent = "unlocked";
   $ekfStatus.textContent = ekfActive ? "predict-only" : "idle";
   $unlock.disabled = true;
+  track("platesolve.unlock");
 });
 
 $manual.addEventListener("click", () => {
   const raw = prompt(
     'Manual location as "lat,lon" (e.g. 48.1486,11.5675 for Munich)',
   );
-  if (!raw) return;
+  if (!raw) {
+    track("manual_location.cancelled");
+    return;
+  }
   const parts = raw.split(",").map((s) => parseFloat(s.trim()));
   if (parts.length !== 2 || parts.some(Number.isNaN)) {
+    track("manual_location.bad_format", { raw });
     alert("Bad format. Expected: lat,lon");
     return;
   }
   sensors.setManualLocation(parts[0]!, parts[1]!, 0);
   renderer.setSky({ latDeg: parts[0]!, lonDeg: parts[1]! }, new Date());
+  track("manual_location.set", { lat: parts[0], lon: parts[1] });
 });
+
+// ----- Periodic field-test telemetry --------------------------------------
+// Every 2 seconds, ship a snapshot of the current sensor/EKF/render state and
+// a frame-rate sample. This is the heartbeat that lets a remote observer
+// confirm the app is alive, see what the phone is doing, and catch slow
+// degradations that don't surface as a hard error.
+let _frames = 0;
+let _lastFpsSample = performance.now();
+const _origRAF = requestAnimationFrame;
+window.requestAnimationFrame = function (cb: FrameRequestCallback): number {
+  return _origRAF((t) => {
+    _frames++;
+    cb(t);
+  });
+};
+setInterval(() => {
+  const now = performance.now();
+  const fps = (_frames * 1000) / (now - _lastFpsSample);
+  _frames = 0;
+  _lastFpsSample = now;
+  const loc = sensors.getLocation();
+  const ori = sensors.getOrientation();
+  const rot = sensors.getRotationRate();
+  track("sample", {
+    fps: Number.isFinite(fps) ? Math.round(fps * 10) / 10 : null,
+    locked: renderer.locked,
+    camera_source: renderer.cameraSource,
+    ekf_active: ekfActive,
+    ekf_yaw_sigma_deg: ekfHasAbsolute
+      ? Math.round(ekf.yawSigmaRad() * (180 / Math.PI) * 100) / 100
+      : null,
+    loc_lat: loc?.latDeg ?? null,
+    loc_lon: loc?.lonDeg ?? null,
+    loc_acc_m: loc?.accuracyM ?? null,
+    ori_alpha: ori?.alphaDeg ?? null,
+    ori_beta: ori?.betaDeg ?? null,
+    ori_gamma: ori?.gammaDeg ?? null,
+    ori_absolute: ori?.absolute ?? null,
+    rot_alpha_dps: rot?.alphaDps ?? null,
+    rot_beta_dps: rot?.betaDps ?? null,
+    rot_gamma_dps: rot?.gammaDps ?? null,
+  });
+}, 2000);
+
+// Surface the session id in the HUD so an operator on the chat side can
+// correlate a particular run with a particular logfile line.
+{
+  const sid = document.createElement("div");
+  sid.className = "hud-row";
+  sid.style.opacity = "0.5";
+  sid.style.fontSize = "10px";
+  sid.style.fontFamily = "ui-monospace, monospace";
+  sid.textContent = `session ${getSessionId()}`;
+  const status = document.getElementById("status");
+  status?.appendChild(sid);
+}
 
 // --- Render loop ----------------------------------------------------------
 function tick(): void {
