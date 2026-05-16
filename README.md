@@ -42,8 +42,8 @@ For plate-solve to work, set `ASTROMETRY_API_KEY` server-side — see [docs/api-
 This project is solo-developed and AGPL-licensed. If you'd like to support continued development:
 
 - ⭐ Star the repo
+- ☕ One-time tip or monthly membership: **[ko-fi.com/lev1307](https://ko-fi.com/lev1307)** — €3/€7/€15 monthly tiers
 - 💖 [GitHub Sponsors](https://github.com/sponsors/lev1307) *(once approved)*
-- ☕ Ko-fi *(coming soon)*
 - 🐦 Share the live demo with stargazing friends
 
 ## License
