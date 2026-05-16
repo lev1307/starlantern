@@ -26,7 +26,7 @@ Three templates: planetariums/science museums, university astronomy departments,
 >
 > [One specific sentence about their institution — last year's exhibit, recent program, anything that proves attention. e.g. "I visited your December dark-sky weekend and was struck by how engaged the families were."]
 >
-> I'm building a phone webapp that shows visitors what the night sky would look like at a perfect dark site — based on real photometric data and locked to their physical surroundings via the camera. Live demo: https://ar-night-sky.vercel.app (best on a phone outside; desktop preview also works).
+> I'm building a phone webapp that shows visitors what the night sky would look like at a perfect dark site — based on real photometric data and locked to their physical surroundings via the camera. Live demo: https://starlantern.app (best on a phone outside; desktop preview also works).
 >
 > 60-second video: [link]
 >
@@ -75,7 +75,7 @@ US (larger ticket sizes, harder closes):
 >
 > I'm a 4th-semester aerospace student at TUM building a webapp that overlays a physically-correct night sky on a phone, locked to reality via plate-solving and IMU fusion. Built primarily for outreach but I think it might fit your intro-astronomy lab — students could compare the rendered sky to what they see, debug their own plate-solves, and walk through atmospheric extinction with a visible Bortle slider.
 >
-> Live: https://ar-night-sky.vercel.app
+> Live: https://starlantern.app
 > Code (AGPL-3.0): https://github.com/lev1307/[repo-name]
 > 60-second video: [link]
 >
@@ -116,9 +116,9 @@ US (larger ticket sizes, harder closes):
 >
 > [Specific sentence — recent launch, a feature you appreciate. e.g. "Picked up the One Pro at IFA — the electrochromic dimming is clearly the right architecture for the use case I'm building toward."]
 >
-> I'm developing AR Night Sky — a physically-correct astronomy overlay built on WebXR, currently shipping as a phone webapp with stereoscopic mode. Eventual target: native app for AR glasses with a forward-mounted astrometric camera.
+> I'm developing Starlantern — a physically-correct astronomy overlay built on WebXR, currently shipping as a phone webapp with stereoscopic mode. Eventual target: native app for AR glasses with a forward-mounted astrometric camera.
 >
-> Live demo: https://ar-night-sky.vercel.app
+> Live demo: https://starlantern.app
 > Stereo mode video: [link]
 >
 > Two reasons for this email:

@@ -1,8 +1,10 @@
-# AR Night Sky
+# Starlantern
 
-A WebXR night-sky overlay that locks to reality via phone-camera plate-solving and renders the sky as it would look at a perfect dark site, anywhere — physically-correct stars, Milky Way, planets, ISS passes, meteors, deep-sky objects, twilight, aurora.
+> A WebXR night-sky overlay that turns your phone into a window onto a Bortle-1 sky — no matter where you actually are.
 
-**Live demo:** [ar-night-sky.vercel.app](https://ar-night-sky.vercel.app) — works in any phone browser, no install.
+Locks to reality via phone-camera plate-solving and renders the sky as it would look at a perfect dark site, anywhere — physically-correct stars, Milky Way, planets, ISS passes, meteors, deep-sky objects, twilight, aurora. The phone version is a prototype for the eventual AR-glasses experience (Xreal / Viture / Rokid).
+
+**Live demo:** [starlantern.app](https://starlantern.app) — works in any phone browser, no install.
 
 ## What it does
 
@@ -25,8 +27,8 @@ TypeScript · Three.js · WebGL2 · Vite. Browser-only, runs on a phone, no inst
 ## Build from source
 
 ```bash
-git clone https://github.com/<owner>/ar-night-sky.git
-cd ar-night-sky
+git clone https://github.com/<owner>/starlantern.git
+cd starlantern
 npm install
 npm run dev
 ```
@@ -50,7 +52,7 @@ This project is solo-developed and AGPL-licensed. If you'd like to support conti
 
 You can build, run, modify, and redistribute this code freely under the AGPL terms. If you use it in a commercial product (especially as a hosted service) the AGPL requires you to either open-source your derivative or obtain a commercial license.
 
-**Commercial license** for proprietary use (no AGPL obligations): contact `lev13072006@gmail.com` *(temporary contact email — will move to a project domain later)*.
+**Commercial license** for proprietary use (no AGPL obligations): contact `hello@starlantern.app`.
 
 ## Contributing
 

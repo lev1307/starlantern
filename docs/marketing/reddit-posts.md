@@ -24,7 +24,7 @@ Best posting time: **9-11am Eastern, weekdays.** Sunday evening also works for /
 
 > Hey r/astronomy. I've been building this in evenings/weekends for a few months and I'm at the point where I want to know if astronomers think the rendering is doing the right thing.
 >
-> **Live demo:** https://ar-night-sky.vercel.app (best on a phone, outside, after dark — but desktop preview works if you crank Bortle to 1 and Exposure to 3, then drag to look around).
+> **Live demo:** https://starlantern.app (best on a phone, outside, after dark — but desktop preview works if you crank Bortle to 1 and Exposure to 3, then drag to look around).
 >
 > **Video:** [link to your demo video]
 >
@@ -57,7 +57,7 @@ Best posting time: **9-11am Eastern, weekdays.** Sunday evening also works for /
 
 > Hi r/Stargazing! Frustrated with my city sky in Munich (Bortle 5-6) and built this so I could preview what the night looks like at Bortle 1 from anywhere.
 >
-> **Try it:** https://ar-night-sky.vercel.app — works in any phone browser, no install.
+> **Try it:** https://starlantern.app — works in any phone browser, no install.
 >
 > **Demo video:** [link]
 >
@@ -82,7 +82,7 @@ Best posting time: **9-11am Eastern, weekdays.** Sunday evening also works for /
 
 **Body (for spaceporn the video IS the post — keep text short):**
 
-> Live demo: https://ar-night-sky.vercel.app
+> Live demo: https://starlantern.app
 >
 > Built this from scratch in TypeScript + Three.js — physically-correct rendering of stars (Gaia DR3 catalog, B-V color, atmospheric extinction), Milky Way, planets, meteors, satellites, aurora, and more. Free + open-source (AGPL).
 >
@@ -102,7 +102,7 @@ Best posting time: **9-11am Eastern, weekdays.** Sunday evening also works for /
 
 > Hi r/space. Solo founder here, 4th-semester aerospace student. Spent the last few months building a WebXR night-sky overlay with the goal of porting it to AR glasses (Viture / Xreal) once optics catch up.
 >
-> The phone webapp is the v1 deliverable, fully working today: https://ar-night-sky.vercel.app
+> The phone webapp is the v1 deliverable, fully working today: https://starlantern.app
 >
 > **Demo video:** [link]
 >

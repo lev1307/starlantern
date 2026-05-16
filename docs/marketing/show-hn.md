@@ -8,7 +8,7 @@ Post when you have a 30-60s outdoor demo video uploaded somewhere (YouTube unlis
 
 Pick one. Test the first; have the second as a backup if it dies in /newest.
 
-1. **Show HN: AR Night Sky – stargazing overlay locked to reality via plate-solving**
+1. **Show HN: Starlantern – stargazing overlay locked to reality via plate-solving**
 2. **Show HN: A WebXR night sky that locks to real stars via phone-camera plate-solving**
 
 Keep "Show HN:" prefix exactly. HN moderators enforce it.
@@ -17,7 +17,7 @@ Keep "Show HN:" prefix exactly. HN moderators enforce it.
 
 ## URL field
 
-`https://ar-night-sky.vercel.app`
+`https://starlantern.app`
 
 (If you've renamed the repo to `starlantern`, you can either keep the old subdomain or migrate first — but don't do both at once on launch day.)
 
