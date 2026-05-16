@@ -88,6 +88,10 @@ app.innerHTML = `
         <button id="lock-btn" type="button">Lock to sky (plate-solve)</button>
         <button id="unlock-btn" type="button" disabled>Clear lock</button>
       </div>
+      <label class="auto-lock-label">
+        <input id="auto-lock" type="checkbox" />
+        <span>Auto re-lock when steady &amp; drifting</span>
+      </label>
       <div class="hud-row"><span class="lbl">Lock</span><span id="lock-status">unlocked</span></div>
       <div class="hud-row"><span class="lbl">EKF</span><span id="ekf-status">idle</span></div>
     </div>
@@ -129,6 +133,12 @@ style.textContent = `
     padding: 0.45rem 0.6rem; font: inherit; cursor: pointer;
   }
   button:hover { background: rgba(255,255,255,0.14); }
+  .auto-lock-label {
+    display: flex !important; align-items: center; gap: 0.5rem;
+    margin-top: 0.5rem; cursor: pointer; user-select: none;
+    font-size: 12px; opacity: 0.8;
+  }
+  .auto-lock-label input { width: auto; margin: 0; }
   .stereo-details { margin-top: 0.5rem; }
   .stereo-details summary { cursor: pointer; opacity: 0.7; font-weight: 500; }
   .stereo-details[open] summary { opacity: 1; }
@@ -170,6 +180,7 @@ const $lock = document.getElementById("lock-btn") as HTMLButtonElement;
 const $unlock = document.getElementById("unlock-btn") as HTMLButtonElement;
 const $lockStatus = document.getElementById("lock-status")!;
 const $ekfStatus = document.getElementById("ekf-status")!;
+const $autoLock = document.getElementById("auto-lock") as HTMLInputElement;
 
 const camera = new CameraCapture();
 const solver = new PlateSolver();
@@ -447,42 +458,70 @@ async function start(): Promise<void> {
 $start.addEventListener("click", () => void start());
 $overlayStart.addEventListener("click", () => void start());
 
-$lock.addEventListener("click", async () => {
-  const fix = sensors.getLocation();
-  if (!fix) {
-    track("platesolve.aborted", { reason: "no_location" });
-    alert("Need a location fix first — grant GPS or use manual location.");
+// --- Lock state & doLock() refactor ---------------------------------------
+// Shared between the manual "Lock to sky" button and the auto re-lock
+// interval. lockInFlight prevents overlapping attempts. lastLockEndedAtMs is
+// used by the auto path to enforce a minimum cooldown between solves.
+let lockInFlight = false;
+let lastLockEndedAtMs = 0;
+
+type LockSource = "manual" | "auto";
+
+/**
+ * Pick how many frames to stack based on the rotation rate observed during
+ * the stillness gate. Steady-as-a-rock → deeper stack for better SNR.
+ * Quivering hand → fewer frames to minimize misregistration.
+ *
+ *   < 0.15 °/s  → 16 frames  (SNR boost ~4×, capture ~500 ms)
+ *   < 0.30 °/s  →  8 frames  (SNR boost ~2.8×, capture ~250 ms)
+ *   else        →  4 frames  (SNR boost ~2×,  capture ~125 ms)
+ */
+function pickFrameCount(rateDps: number | null): number {
+  if (rateDps == null) return 8; // no gyro / desktop → default
+  if (rateDps < 0.15) return 16;
+  if (rateDps < 0.3) return 8;
+  return 4;
+}
+
+async function doLock(source: LockSource): Promise<void> {
+  if (lockInFlight) {
+    track("platesolve.aborted", { reason: "already_in_flight", source });
     return;
   }
+  const fix = sensors.getLocation();
+  if (!fix) {
+    track("platesolve.aborted", { reason: "no_location", source });
+    if (source === "manual") {
+      alert("Need a location fix first — grant GPS or use manual location.");
+    }
+    return;
+  }
+  lockInFlight = true;
   $lock.disabled = true;
   const prevLabel = $lock.textContent;
   const tStart = performance.now();
-  track("platesolve.start", { lat: fix.latDeg, lon: fix.lonDeg });
+  const prefix = source === "auto" ? "[auto] " : "";
+  track("platesolve.start", {
+    source,
+    lat: fix.latDeg,
+    lon: fix.lonDeg,
+  });
   try {
-    $lockStatus.textContent = "opening camera…";
-    track("platesolve.camera_open_begin");
+    $lockStatus.textContent = `${prefix}opening camera…`;
+    track("platesolve.camera_open_begin", { source });
     await camera.open();
     track("platesolve.camera_open_done", {
+      source,
       ms: Math.round(performance.now() - tStart),
     });
 
     // -- Stillness gate -------------------------------------------------
-    // Astrometry needs sharp star points. Motion blur during capture is the
-    // single biggest cause of solve failure. We poll the gyro until rotation
-    // rate magnitude has been below STILL_DPS for STILL_MS continuously,
-    // then proceed. On desktop preview / denied motion permission, we skip
-    // the gate (no gyro readings ever arrive).
-    //
-    // Threshold rationale (8-frame stack over ~250 ms at 60 ° FOV / 1920 px):
-    //   0.2 °/s → ≈ 2 px stack misregistration  (excellent)
-    //   0.5 °/s → ≈ 4 px                          (acceptable; threshold)
-    //   1   °/s → ≈ 8 px                          (centroids fuzzy)
-    //   2   °/s → ≈ 16 px streaks                 (abort post-capture)
     const STILL_DPS = 0.5;
     const STILL_MS = 600;
     const STILL_TIMEOUT_MS = 8000;
-    $lockStatus.textContent = "hold still…";
+    $lockStatus.textContent = `${prefix}hold still…`;
     track("platesolve.still_wait_begin", {
+      source,
       threshold_dps: STILL_DPS,
       required_ms: STILL_MS,
     });
@@ -490,6 +529,7 @@ $lock.addEventListener("click", async () => {
     let stillSince: number | null = null;
     let stillResult: "stable" | "timeout" | "no_gyro" = "stable";
     let lastRateDps: number | null = null;
+    let minRateDuringHold = Infinity;
     let firstGyroAt: number | null = null;
     let lastStatusMs = 0;
     while (true) {
@@ -500,20 +540,24 @@ $lock.addEventListener("click", async () => {
         const rateDps = Math.hypot(r.alphaDps, r.betaDps, r.gammaDps);
         lastRateDps = rateDps;
         if (rateDps < STILL_DPS) {
-          if (stillSince == null) stillSince = now;
+          if (stillSince == null) {
+            stillSince = now;
+            minRateDuringHold = rateDps;
+          } else {
+            if (rateDps < minRateDuringHold) minRateDuringHold = rateDps;
+          }
           if (now - stillSince >= STILL_MS) break;
         } else {
           stillSince = null;
+          minRateDuringHold = Infinity;
         }
         // Throttle the HUD update to ~4 Hz so it stays readable on the phone.
         if (now - lastStatusMs > 250) {
           lastStatusMs = now;
           const heldFor = stillSince ? Math.round(now - stillSince) : 0;
-          $lockStatus.textContent = `hold still… ${heldFor}/${STILL_MS} ms (rate ${rateDps.toFixed(2)}°/s)`;
+          $lockStatus.textContent = `${prefix}hold still… ${heldFor}/${STILL_MS} ms (rate ${rateDps.toFixed(2)}°/s)`;
         }
       } else if (firstGyroAt == null && now - tStill0 > 1500) {
-        // No gyro reading after 1.5 s → desktop preview or motion denied.
-        // Skip the gate so the rest of the flow still works.
         stillResult = "no_gyro";
         break;
       }
@@ -524,18 +568,32 @@ $lock.addEventListener("click", async () => {
       await new Promise((res) => setTimeout(res, 50));
     }
     track("platesolve.still_wait_done", {
+      source,
       result: stillResult,
       wait_ms: Math.round(performance.now() - tStill0),
       last_rate_dps: lastRateDps,
+      min_rate_during_hold_dps: Number.isFinite(minRateDuringHold)
+        ? minRateDuringHold
+        : null,
     });
     if (stillResult === "timeout") {
-      $lockStatus.textContent =
-        "still-wait timed out — capturing anyway (may blur)";
+      if (source === "auto") {
+        // Don't bother capturing if auto-relock can't even get a still window.
+        track("platesolve.aborted", { source, reason: "still_timeout" });
+        $lockStatus.textContent = "auto re-lock: couldn't find a still moment";
+        return;
+      }
+      $lockStatus.textContent = `${prefix}still-wait timed out — capturing anyway (may blur)`;
     }
 
+    // Adaptive frame count from the minimum rate observed during the hold.
+    // If we skipped the gate (no_gyro), fall back to default 8.
+    const frames =
+      stillResult === "stable"
+        ? pickFrameCount(minRateDuringHold)
+        : pickFrameCount(null);
+
     // -- Capture with motion monitoring ---------------------------------
-    // Subscribe to rotation events for the duration of the capture so we
-    // can characterize whatever blur slipped through the gate.
     let captureRotPeak = 0;
     let captureRotSum = 0;
     let captureRotN = 0;
@@ -546,46 +604,68 @@ $lock.addEventListener("click", async () => {
       captureRotN += 1;
     });
 
-    $lockStatus.textContent = "capturing (stacking 8 frames)…";
-    track("platesolve.capture_begin", { frames: 8 });
+    $lockStatus.textContent = `${prefix}capturing (stacking ${frames} frames)…`;
+    track("platesolve.capture_begin", { source, frames });
     const tCap = performance.now();
-    const capture = await camera.grabStacked(8);
+    const capture = await camera.grabStacked(frames);
     unsubscribeRot();
     const captureRotMean = captureRotN > 0 ? captureRotSum / captureRotN : 0;
     track("platesolve.capture_done", {
+      source,
+      frames,
       ms: Math.round(performance.now() - tCap),
       bytes: capture.blob.size,
       utc_ms: capture.utcMs,
       rot_peak_dps: Math.round(captureRotPeak * 100) / 100,
       rot_mean_dps: Math.round(captureRotMean * 100) / 100,
       rot_samples: captureRotN,
+      sharpness: Math.round(capture.sharpness * 100) / 100,
     });
 
-    // Hard abort if peak motion exceeded the streak-threshold — astrometry
-    // will fail on this image, so don't waste a 20 s solve cycle on it.
+    // Hard abort if peak motion exceeded the streak-threshold.
     const HARD_ABORT_DPS = 2.0;
     if (captureRotPeak > HARD_ABORT_DPS) {
       track("platesolve.aborted", {
+        source,
         reason: "motion_during_capture",
         peak_dps: captureRotPeak,
         mean_dps: captureRotMean,
       });
       $lockStatus.textContent = `moved too much during capture (peak ${captureRotPeak.toFixed(1)}°/s) — try again`;
-      return; // finally re-enables the button
+      return;
     }
 
-    // Snapshot device pose at the moment of capture (best estimate).
+    // Sharpness pre-check. Threshold deliberately low — the goal is to catch
+    // obviously broken frames (lens cap on, total darkness, severe blur) and
+    // avoid burning a 20 s solve cycle. We tune this from real data over
+    // time. Manual captures get one more retry hint; auto silently aborts.
+    const SHARPNESS_HARD_MIN = 3;
+    if (capture.sharpness < SHARPNESS_HARD_MIN) {
+      track("platesolve.aborted", {
+        source,
+        reason: "sharpness_too_low",
+        sharpness: capture.sharpness,
+        threshold: SHARPNESS_HARD_MIN,
+      });
+      $lockStatus.textContent =
+        source === "manual"
+          ? `image too dark/blurry (sharpness ${capture.sharpness.toFixed(1)}) — point at brighter sky or open lens`
+          : "auto re-lock: image too dark to solve";
+      return;
+    }
+
     const qDevice = renderer.getDeviceQuaternion();
 
-    $lockStatus.textContent = "uploading…";
+    $lockStatus.textContent = `${prefix}uploading…`;
     const tSolve = performance.now();
     const result = await solver.solve(
       capture.blob,
       { latDeg: fix.latDeg, lonDeg: fix.lonDeg },
       capture.utcMs,
       (s) => {
-        $lockStatus.textContent = `${s}…`;
+        $lockStatus.textContent = `${prefix}${s}…`;
         track("platesolve.progress", {
+          source,
           state: s,
           ms: Math.round(performance.now() - tSolve),
         });
@@ -595,8 +675,11 @@ $lock.addEventListener("click", async () => {
     renderer.applyLock(result.qCameraWorld, qDevice);
     lockTimeMs = Date.now();
     track("platesolve.success", {
+      source,
       total_ms: Math.round(performance.now() - tStart),
       solve_ms: Math.round(performance.now() - tSolve),
+      frames_used: frames,
+      sharpness: Math.round(capture.sharpness * 100) / 100,
       ra: result.calibration.ra,
       dec: result.calibration.dec,
       radius: result.calibration.radius,
@@ -605,20 +688,19 @@ $lock.addEventListener("click", async () => {
       parity: result.calibration.parity,
       fov_deg: result.fovDeg,
     });
-    $lockStatus.textContent = `LOCKED — RA ${result.calibration.ra.toFixed(2)}°, Dec ${result.calibration.dec.toFixed(2)}°`;
+    $lockStatus.textContent = `${prefix}LOCKED — RA ${result.calibration.ra.toFixed(2)}°, Dec ${result.calibration.dec.toFixed(2)}°`;
     $unlock.disabled = false;
-    // Feed the plate-solve into the EKF as a high-precision absolute update.
     if (ekfActive) {
-      ekf.update(result.qCameraWorld, 5e-5); // ~10 arcsec stddev
+      ekf.update(result.qCameraWorld, 5e-5);
       ekfHasAbsolute = true;
-      // Switch camera source to EKF — continuous drift correction from here on.
       renderer.cameraSource = "ekf";
       $ekfStatus.textContent = "locked (plate-solve fix injected)";
-      track("ekf.fix_injected", { sigma_rad: 5e-5 });
+      track("ekf.fix_injected", { source, sigma_rad: 5e-5 });
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     track("platesolve.failure", {
+      source,
       message: msg,
       stack: err instanceof Error ? (err.stack ?? null) : null,
       total_ms: Math.round(performance.now() - tStart),
@@ -626,10 +708,47 @@ $lock.addEventListener("click", async () => {
     $lockStatus.textContent = `failed: ${msg}`;
     console.error("Plate-solve failed", err);
   } finally {
+    lockInFlight = false;
+    lastLockEndedAtMs = Date.now();
     $lock.disabled = false;
     $lock.textContent = prevLabel ?? "Lock to sky (plate-solve)";
   }
+}
+
+$lock.addEventListener("click", () => {
+  void doLock("manual");
 });
+
+// --- Auto re-lock loop ----------------------------------------------------
+// When the toggle is on AND we already have an initial plate-solved lock AND
+// the EKF says it's drifting (yaw σ > AUTO_SIGMA_THRESHOLD_DEG) AND the phone
+// is reasonably steady right now AND we haven't fired recently → quietly
+// fire another solve in the background.
+const AUTO_SIGMA_THRESHOLD_DEG = 0.1;
+const AUTO_CURRENT_RATE_DPS = 0.5;
+const AUTO_MIN_INTERVAL_MS = 15_000;
+const AUTO_CHECK_INTERVAL_MS = 2_000;
+$autoLock.addEventListener("change", () => {
+  track("auto_relock.toggle", { enabled: $autoLock.checked });
+});
+setInterval(() => {
+  if (!$autoLock.checked) return;
+  if (!ekfHasAbsolute) return; // need an initial lock to bootstrap
+  if (lockInFlight) return;
+  if (Date.now() - lastLockEndedAtMs < AUTO_MIN_INTERVAL_MS) return;
+  const sigmaDeg = ekf.yawSigmaRad() * (180 / Math.PI);
+  if (sigmaDeg < AUTO_SIGMA_THRESHOLD_DEG) return;
+  const r = sensors.getRotationRate();
+  if (!r) return;
+  const rateDps = Math.hypot(r.alphaDps, r.betaDps, r.gammaDps);
+  if (rateDps > AUTO_CURRENT_RATE_DPS) return;
+  track("auto_relock.trigger", {
+    sigma_deg: Math.round(sigmaDeg * 1000) / 1000,
+    current_rate_dps: Math.round(rateDps * 100) / 100,
+    secs_since_last_lock: Math.round((Date.now() - lastLockEndedAtMs) / 1000),
+  });
+  void doLock("auto");
+}, AUTO_CHECK_INTERVAL_MS);
 
 $unlock.addEventListener("click", () => {
   renderer.clearLock();
