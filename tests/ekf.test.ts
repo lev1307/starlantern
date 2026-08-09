@@ -70,6 +70,46 @@ describe("OrientationEKF", () => {
     expect(angleBetween(ekf.state().q, qTrue)).toBeLessThan(0.01);
   });
 
+  it("attitudeSigmaRad bounds yawSigmaRad and shrinks on a precise fix", () => {
+    const ekf = new OrientationEKF();
+    // Total attitude uncertainty is the RSS over all three axes, so it can
+    // never be smaller than the yaw component alone.
+    expect(ekf.attitudeSigmaRad()).toBeGreaterThanOrEqual(ekf.yawSigmaRad());
+
+    const before = ekf.attitudeSigmaRad();
+    ekf.update(IDENTITY, 5e-5); // an arcsecond-class plate-solve
+    const after = ekf.attitudeSigmaRad();
+    expect(after).toBeLessThan(before);
+    // A 10-arcsec measurement should pull total 1-σ into the arcminute regime.
+    expect(after * (180 / Math.PI) * 60).toBeLessThan(1);
+  });
+
+  it("attitude uncertainty grows while coasting on the gyro alone", () => {
+    const ekf = new OrientationEKF();
+    ekf.update(IDENTITY, 5e-5);
+    const atFix = ekf.attitudeSigmaRad();
+    for (let i = 0; i < 6000; i++) ekf.predict([0, 0, 0], 0.01); // 60 s coast
+    expect(ekf.attitudeSigmaRad()).toBeGreaterThan(atFix);
+  });
+
+  it("update returns the innovation it corrected, as measured drift", () => {
+    const ekf = new OrientationEKF();
+    ekf.update(IDENTITY, 5e-5); // anchor at identity
+    // Coast with no rotation, then hand it a fix 0.5° away: the filter had
+    // drifted by exactly that much relative to truth.
+    for (let i = 0; i < 100; i++) ekf.predict([0, 0, 0], 0.01);
+    const drift = 0.5 * (Math.PI / 180);
+    const { innovationRad } = ekf.update(fromAxisAngle([0, 0, 1], drift), 5e-5);
+    expect(innovationRad).toBeCloseTo(drift, 4);
+  });
+
+  it("reports a near-zero innovation when the fix confirms the state", () => {
+    const ekf = new OrientationEKF();
+    ekf.update(IDENTITY, 5e-5);
+    const { innovationRad } = ekf.update(IDENTITY, 5e-5);
+    expect(innovationRad).toBeLessThan(1e-6);
+  });
+
   it("covariance stays symmetric and PSD after many predict/update cycles", () => {
     const ekf = new OrientationEKF();
     for (let i = 0; i < 50; i++) {

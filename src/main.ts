@@ -15,6 +15,7 @@ import type { Quat } from "./quaternion";
 import { loadStarCatalog } from "./catalog";
 import { loadSatellites, satelliteSnapshotInfo } from "./satellites";
 import { getSessionId, track, trackBoot } from "./telemetry";
+import { AccuracyStats, readout } from "./accuracy";
 
 const app = document.getElementById("app");
 if (!app) throw new Error("No #app container found");
@@ -26,6 +27,16 @@ trackBoot();
 app.innerHTML = `
   <canvas id="sky"></canvas>
   <button id="hud-toggle" type="button" aria-label="Toggle HUD" title="Show/hide HUD">⌃</button>
+  <div id="accuracy" class="acc acc-idle" role="status" aria-live="polite" title="Pointing accuracy (tap to hide)">
+    <span class="acc-dot"></span>
+    <span class="acc-body">
+      <span class="acc-head">
+        <span id="acc-label" class="acc-label">NO LOCK</span>
+        <span id="acc-value" class="acc-value">—</span>
+      </span>
+      <span id="acc-detail" class="acc-detail">compass only — tap Lock to sky</span>
+    </span>
+  </div>
   <div id="hud">
     <div id="status" class="hud-card">
       <div class="hud-row"><span class="lbl">Location</span><span id="loc">—</span></div>
@@ -165,6 +176,48 @@ style.textContent = `
   .stereo-details summary { cursor: pointer; opacity: 0.7; font-weight: 500; }
   .stereo-details[open] summary { opacity: 1; }
   .stereo-details label { margin-top: 0.35rem; }
+  /* Pointing-accuracy badge. Deliberately outside #hud so collapsing the debug
+     HUD leaves a clean sky with only this — the shot worth recording. */
+  .acc {
+    position: fixed; top: 0.6rem; left: 50%; transform: translateX(-50%);
+    z-index: 6; pointer-events: auto; cursor: pointer; user-select: none;
+    display: flex; align-items: center; justify-content: center; gap: 0.5rem;
+    /* Fixed floor so the badge doesn't resize as it changes state — it is
+       centre-anchored, and a width jump reads as a glitch on video. */
+    min-width: 12.5rem; box-sizing: border-box;
+    padding: 0.4rem 0.7rem 0.4rem 0.6rem;
+    background: rgba(0,0,0,0.6); backdrop-filter: blur(6px);
+    border: 1px solid rgba(255,255,255,0.12); border-radius: 999px;
+    font: 12px/1.25 system-ui, sans-serif; color: #ddd;
+    transition: opacity 0.2s ease;
+  }
+  .acc.acc-hidden { opacity: 0; pointer-events: none; }
+  .acc-dot {
+    width: 0.5rem; height: 0.5rem; flex: none; border-radius: 50%;
+    background: #888; box-shadow: 0 0 6px currentColor; color: #888;
+  }
+  .acc-body { display: flex; flex-direction: column; gap: 0.1rem; }
+  .acc-head { display: flex; align-items: baseline; gap: 0.45rem; }
+  .acc-label { font-weight: 600; letter-spacing: 0.08em; font-size: 11px; }
+  .acc-value {
+    font: 600 14px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+  .acc-detail { opacity: 0.55; font-size: 10px; white-space: nowrap; }
+  .acc-locked   .acc-dot { background: #5fe08a; color: #5fe08a; }
+  .acc-locked   .acc-label, .acc-locked   .acc-value { color: #5fe08a; }
+  .acc-drifting .acc-dot { background: #f0b429; color: #f0b429; }
+  .acc-drifting .acc-label, .acc-drifting .acc-value { color: #f0b429; }
+  .acc-lost     .acc-dot { background: #f2665e; color: #f2665e; }
+  .acc-lost     .acc-label, .acc-lost     .acc-value { color: #f2665e; }
+  .acc-solving  .acc-dot { background: #88aaff; color: #88aaff; animation: acc-pulse 1s ease-in-out infinite; }
+  .acc-solving  .acc-label { color: #88aaff; }
+  @keyframes acc-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }
+  @media (prefers-reduced-motion: reduce) { .acc-solving .acc-dot { animation: none; } }
+  /* On a phone the centred badge and the top-left status card fight for the
+     same strip. Reserve the strip for the badge; wide screens have room for
+     both side by side and need no offset. */
+  @media (max-width: 720px) { #status { margin-top: 2.75rem; } }
   .overlay {
     position: fixed; inset: 0; background: rgba(0,0,0,0.85);
     display: flex; align-items: center; justify-content: center;
@@ -207,6 +260,15 @@ const $unlock = document.getElementById("unlock-btn") as HTMLButtonElement;
 const $lockStatus = document.getElementById("lock-status")!;
 const $ekfStatus = document.getElementById("ekf-status")!;
 const $autoLock = document.getElementById("auto-lock") as HTMLInputElement;
+const $acc = document.getElementById("accuracy")!;
+const $accLabel = document.getElementById("acc-label")!;
+const $accValue = document.getElementById("acc-value")!;
+const $accDetail = document.getElementById("acc-detail")!;
+// Tap the badge to hide it — for recording a completely unadorned sky.
+$acc.addEventListener("click", () => {
+  const hidden = $acc.classList.toggle("acc-hidden");
+  track("accuracy_badge.toggle", { hidden });
+});
 const $hud = document.getElementById("hud")!;
 const $hudToggle = document.getElementById("hud-toggle") as HTMLButtonElement;
 $hudToggle.addEventListener("click", () => {
@@ -229,6 +291,11 @@ let lockTimeMs: number | null = null;
 const ekf = new OrientationEKF();
 let ekfActive = false;
 let ekfHasAbsolute = false;
+
+// Accuracy bookkeeping: time-to-first-lock, measured drift between solves,
+// solve success rate. These are the numbers the launch post quotes, so they are
+// collected from real runs rather than asserted.
+const accStats = new AccuracyStats();
 let lastMotionTMs: number | null = null;
 
 $offset.addEventListener("input", () => {
@@ -580,6 +647,7 @@ async function doLock(source: LockSource): Promise<void> {
     return;
   }
   lockInFlight = true;
+  accStats.noteAttempt(Date.now());
   $lock.disabled = true;
   const prevLabel = $lock.textContent;
   const tStart = performance.now();
@@ -773,13 +841,23 @@ async function doLock(source: LockSource): Promise<void> {
     });
     $lockStatus.textContent = `${prefix}LOCKED — RA ${result.calibration.ra.toFixed(2)}°, Dec ${result.calibration.dec.toFixed(2)}°`;
     $unlock.disabled = false;
+    let innovationRad: number | null = null;
     if (ekfActive) {
-      ekf.update(result.qCameraWorld, 5e-5);
+      // The correction this fix applies is how far the filter had drifted since
+      // the previous one — captured before the update collapses it.
+      ({ innovationRad } = ekf.update(result.qCameraWorld, 5e-5));
       ekfHasAbsolute = true;
       renderer.cameraSource = "ekf";
       $ekfStatus.textContent = "locked (plate-solve fix injected)";
-      track("ekf.fix_injected", { source, sigma_rad: 5e-5 });
+      track("ekf.fix_injected", {
+        source,
+        sigma_rad: 5e-5,
+        innovation_deg:
+          Math.round(innovationRad * (180 / Math.PI) * 1000) / 1000,
+      });
     }
+    accStats.noteSuccess(Date.now(), innovationRad);
+    track("accuracy.stats", accStats.summary());
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     track("platesolve.failure", {
@@ -900,6 +978,11 @@ setInterval(() => {
     ekf_yaw_sigma_deg: ekfHasAbsolute
       ? Math.round(ekf.yawSigmaRad() * (180 / Math.PI) * 100) / 100
       : null,
+    ekf_attitude_sigma_arcmin: ekfHasAbsolute
+      ? Math.round(ekf.attitudeSigmaRad() * (180 / Math.PI) * 60 * 10) / 10
+      : null,
+    measured_drift_deg_per_min: accStats.lastDriftDegPerMin(),
+    solve_count: accStats.solveCount,
     loc_lat: loc?.latDeg ?? null,
     loc_lon: loc?.lonDeg ?? null,
     loc_acc_m: loc?.accuracyM ?? null,
@@ -924,6 +1007,38 @@ setInterval(() => {
   sid.textContent = `session ${getSessionId()}`;
   const status = document.getElementById("status");
   status?.appendChild(sid);
+}
+
+// --- Pointing-accuracy badge ----------------------------------------------
+// Refreshed at 5 Hz: fast enough to read as live in a video, slow enough that
+// the digits stay legible and we aren't writing DOM text 60×/s.
+const ACC_REFRESH_MS = 200;
+let lastAccUpdateMs = 0;
+let accClass = "acc-idle";
+
+function updateAccuracyBadge(): void {
+  const now = performance.now();
+  if (now - lastAccUpdateMs < ACC_REFRESH_MS) return;
+  lastAccUpdateMs = now;
+
+  const r = readout({
+    solving: lockInFlight,
+    hasFix: ekfHasAbsolute && renderer.cameraSource === "ekf",
+    sigmaRad: ekfActive ? ekf.attitudeSigmaRad() : null,
+    secsSinceSolve: accStats.secsSinceSolve(Date.now()),
+    measuredDriftDegPerMin: accStats.lastDriftDegPerMin(),
+  });
+
+  $accLabel.textContent = r.label;
+  $accValue.textContent = r.value;
+  $accDetail.textContent = r.detail;
+
+  const nextClass = `acc-${r.state}`;
+  if (nextClass !== accClass) {
+    $acc.classList.remove(accClass);
+    $acc.classList.add(nextClass);
+    accClass = nextClass;
+  }
 }
 
 // --- Render loop ----------------------------------------------------------
@@ -991,6 +1106,8 @@ function tick(): void {
       $lockStatus.textContent = `locked ${secsSince}s ago (drift growing — re-lock if needed)`;
     }
   }
+
+  updateAccuracyBadge();
 
   renderer.render();
   requestAnimationFrame(tick);

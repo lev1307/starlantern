@@ -141,6 +141,22 @@ export class OrientationEKF {
   }
 
   /**
+   * Total attitude uncertainty (1-σ) in radians: the expected magnitude of the
+   * δθ error vector, i.e. √trace of the 3×3 attitude block.
+   *
+   * This is the number to show a user asking "how well are you pointing?".
+   * yawSigmaRad() alone understates it — a phone can be confident about heading
+   * while uncertain in pitch, and the overlay misaligns either way.
+   */
+  attitudeSigmaRad(): number {
+    const trace =
+      Math.max(0, this.P[0]![0]!) +
+      Math.max(0, this.P[1]![1]!) +
+      Math.max(0, this.P[2]![2]!);
+    return Math.sqrt(trace);
+  }
+
+  /**
    * Predict step. omegaRaw is the body-frame angular velocity reading from the gyro;
    * dt is seconds elapsed since last call.
    */
@@ -183,11 +199,17 @@ export class OrientationEKF {
    * Update with an absolute orientation measurement q_meas (body→world), assumed
    * isotropic-Gaussian with stdev sigmaRad (radians, 1-σ on each axis).
    * Used when plate-solve returns a WCS pose for the IMU frame at capture time.
+   *
+   * Returns the innovation magnitude in radians — how far the measurement
+   * disagreed with the propagated state before correction. Between two
+   * plate-solves that is the filter's true accumulated drift, which is a
+   * stronger accuracy claim than the covariance the filter reports about itself.
    */
-  update(qMeas: Quat, sigmaRad: number): void {
+  update(qMeas: Quat, sigmaRad: number): { innovationRad: number } {
     // Innovation: δ = log(q_meas ⊗ q⁻¹) as a 3-vector small-angle rotation.
     const dq = multiply(qMeas, [this.q[0], -this.q[1], -this.q[2], -this.q[3]]);
     const innov = toRotationVector(dq);
+    const innovationRad = Math.hypot(innov[0], innov[1], innov[2]);
 
     // Measurement Jacobian: H = [I_3, 0_3] (we measure attitude only, not bias).
     const H: Matrix = [
@@ -228,5 +250,7 @@ export class OrientationEKF {
     const term1 = matMul(matMul(I_KH, this.P), transpose(I_KH));
     const term2 = matMul(matMul(K, R), transpose(K));
     this.P = matAdd(term1, term2);
+
+    return { innovationRad };
   }
 }
