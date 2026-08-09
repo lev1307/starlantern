@@ -1,155 +1,189 @@
-# Phase-4 cold-email templates
+# Cold-email templates
 
-Three templates: planetariums/science museums, university astronomy departments, and AR-glasses OEMs (commercial dual-licensing).
+> **Rewritten 2026-08-09 against ADR-016/017/023.** The AR-glasses OEM template is gone — ADR-016
+> removed glasses from the near-term plan, so those emails were selling a product that no longer
+> exists. Replaced with **telescope makers / smart-telescope startups** (the real tier-2 licensing
+> market) and the **tier-3 validation emails** (ADR-023), which are the cheapest way to find out
+> whether the aerospace story is real.
 
-**Universal rules:**
+```bash
+grep -n "{{" docs/marketing/cold-emails.md && echo "STILL HAS PLACEHOLDERS — fill or cut"
+```
 
-- Send from a personal email (not hello@). Founders get more replies.
-- Subject line < 50 chars. No emoji. No marketing words ("amazing", "revolutionary").
-- Body < 200 words. They will scan, not read.
-- One specific ask per email. "Would 15 minutes next week work?" not "would love to discuss."
-- Include the live URL + the demo video. Always.
-- Personalise the first sentence. Mention something specific to their institution. "Saw your Wendelstein 80cm telescope project last year" — proves you're not blasting a list.
-- Send Tuesday-Thursday, 9-11am their local time.
-- Track replies in a spreadsheet. 5-10% reply rate is normal; 1-2% close rate over a quarter is good for B2B.
+**Universal rules**
+
+- Personal email, not `hello@`. Founders get replies; role accounts don't.
+- Subject < 50 chars, no emoji, no marketing adjectives.
+- Body < 200 words. They scan.
+- **One** specific ask. "Would 15 minutes next week work?" beats "would love to discuss."
+- First sentence personalised with something only someone paying attention would know.
+- Always include the live URL and the video.
+- Tuesday–Thursday, 9–11am their local time.
+- Track in a sheet. 5–10% reply rate is normal; 1–2% close over a quarter is good.
+
+**What changed in the pitch:** lead with the pointing accuracy, not the rendering. The rendering is
+what makes it pretty; the lock is what makes it _defensible_, and it's the only line in the email a
+technical reader can't get from any of five free apps.
 
 ---
 
-## Template 1: Planetariums + science museums
+## Template 1 — Telescope makers & smart-telescope startups (tier 2, the real licensing market)
+
+The adjacent market that actually needs this: ZWO (Seestar), Vaonis (Vespera/Stellina), Unistellar
+(eVscope), Celestron (StarSense), Sky-Watcher, Explore Scientific. All of them either ship
+plate-solve-based alignment or need it, and it is not their core competence.
 
 **Subject:**
-> Visitor tool for [Planetarium Name]?
+
+> Plate-solve alignment on commodity phone hardware
 
 **Body:**
 
 > Hi [Name],
 >
-> [One specific sentence about their institution — last year's exhibit, recent program, anything that proves attention. e.g. "I visited your December dark-sky weekend and was struck by how engaged the families were."]
+> [Specific sentence — a product decision of theirs you actually have a view on. e.g. "The Seestar's
+> > one-tap alignment is the part of the product I point people at when they say smart telescopes are
+> > overpriced."]
 >
-> I'm building a phone webapp that shows visitors what the night sky would look like at a perfect dark site — based on real photometric data and locked to their physical surroundings via the camera. Live demo: https://starlantern.app (best on a phone outside; desktop preview also works).
+> I've built a phone app that determines its own attitude by plate-solving the sky through the phone
+> camera and fusing the solution with the IMU through an MEKF. On commodity hardware, no mount and
+> no dedicated optics, it holds a median **{{N1_MEDIAN_ARCMIN}}′** with **{{N4_DRIFT_DEG_MIN}}°/min**
+> of drift between fixes, first lock in **{{N5_TTFL_SEC}} s**.
 >
-> 60-second video: [link]
+> Live: https://ar-night-sky.vercel.app · 60-second video: [link] · Code: AGPL-3.0
 >
-> The use case I'm imagining for [Planetarium]: visitors scan a QR code, see the rendered night sky over their actual city, then scroll a slider to preview Bortle 1 — making the "this is what we lost to light pollution" message visceral instead of abstract.
+> I'm not pitching you an app. I'm asking whether the attitude-determination piece is worth
+> licensing — as an alignment aid for manual mounts, or as a phone-side companion to an existing
+> product. It's dual-licensable away from AGPL.
 >
-> Would 15 minutes next week work for me to walk you through it? Happy to do a free pilot install if you'd like to try it for an upcoming event.
+> Would 20 minutes be useful? Happy to send the measurement methodology first if that's the more
+> interesting artifact.
 >
-> Best,
-> [Your name]
-> [TUM, 4th-semester aerospace]
-> [link to GitHub or LinkedIn]
+> [Name] · TUM aerospace
 
-**Targets to compile:**
-
-EU first (closer / easier follow-up):
-- Deutsches Museum (Munich) — closest, biggest leverage
-- Planetarium Hamburg
-- Planetarium Stuttgart
-- Zeiss-Großplanetarium Berlin
-- Volkswagen Planetarium Wolfsburg
-- Cité de l'espace (Toulouse)
-- Royal Observatory Greenwich
-- Tycho Brahe Planetarium (Copenhagen)
-- Heureka (Helsinki)
-
-US (larger ticket sizes, harder closes):
-- Adler Planetarium (Chicago)
-- Hayden Planetarium (NYC)
-- Griffith Observatory (LA)
-- Fels Planetarium (Philadelphia)
-
-**Ticket size:** €500-3,000/year per institution as a license + setup.
+**Ticket size:** licensing in the €5k–50k range, or per-unit royalty. Sales cycle 3–9 months.
+**Prerequisite:** do not send until the on-device WASM solver exists or is credibly close — a
+network-dependent solver is a non-starter for a product used in the field, and they will say so.
 
 ---
 
-## Template 2: University astronomy departments
+## Template 2 — Planetariums & science museums
 
 **Subject:**
-> Intro-astronomy classroom tool — TUM aerospace
+
+> Visitor tool for [Planetarium]?
+
+**Body:**
+
+> Hi [Name],
+>
+> [One specific sentence about their institution — an exhibit, a programme, a talk you attended.]
+>
+> I've built a free phone webapp that shows visitors the sky over their actual location as it would
+> look at a perfect dark site. It anchors the overlay by plate-solving the phone camera rather than
+> using the compass, so it points where the visitor is actually pointing instead of a constellation
+> away — which matters when you're asking a room of people to find something.
+>
+> Live demo: https://ar-night-sky.vercel.app · 60-second video: [link]
+>
+> The use I imagine for [Planetarium]: visitors scan a QR code outside, see their real sky, then
+> drag one slider from Bortle 8 to Bortle 1 and watch the Milky Way appear. It makes "this is what
+> light pollution took" concrete rather than rhetorical.
+>
+> Would 15 minutes next week work? Happy to do a free pilot for an upcoming event.
+>
+> [Name] · TUM aerospace
+
+**Targets — EU first (easier follow-up):** Deutsches Museum (Munich, closest and highest leverage),
+Planetarium Hamburg, Planetarium Stuttgart, Zeiss-Großplanetarium Berlin, Wolfsburg,
+Cité de l'espace (Toulouse), Royal Observatory Greenwich, Tycho Brahe (Copenhagen), Heureka
+(Helsinki). **US (bigger tickets, harder closes):** Adler, Hayden, Griffith, Fels.
+
+**Ticket size:** €500–3,000/year per institution.
+
+---
+
+## Template 3 — University astronomy & teaching labs
+
+**Subject:**
+
+> Intro-astronomy lab tool — TUM aerospace
 
 **Body:**
 
 > Hi [Prof Lastname],
 >
-> [Specific sentence — recent paper, thesis topic, course they teach.]
+> [Specific sentence — a paper, a course they teach, a thesis topic.]
 >
-> I'm a 4th-semester aerospace student at TUM building a webapp that overlays a physically-correct night sky on a phone, locked to reality via plate-solving and IMU fusion. Built primarily for outreach but I think it might fit your intro-astronomy lab — students could compare the rendered sky to what they see, debug their own plate-solves, and walk through atmospheric extinction with a visible Bortle slider.
+> I'm a TUM aerospace student. I've built a phone app that does attitude determination by
+> plate-solving the sky and fusing with the IMU through an MEKF — essentially a star tracker on
+> commodity hardware. It logs its own error: median **{{N1_MEDIAN_ARCMIN}}′**, drift
+> **{{N4_DRIFT_DEG_MIN}}°/min** between fixes.
 >
-> Live: https://starlantern.app
-> Code (AGPL-3.0): https://github.com/lev1307/[repo-name]
-> 60-second video: [link]
+> Live: https://ar-night-sky.vercel.app · Code (AGPL-3.0):
+> https://github.com/lev1307/starlantern · Video: [link]
 >
-> I'd love a few minutes of your time for two reasons: (a) feedback on whether the math is doing what astronomers expect, and (b) interest in deploying it as a free teaching tool in your courses (with optional support for €200-500/term if useful).
+> Two reasons to write. First, I'd value your view on whether I'm characterising the error
+> correctly — I quote the filter innovation rather than its covariance, and I'd rather be corrected
+> early. Second, it may fit an intro lab: students compare the rendered sky to the real one, run
+> their own solves, and see extinction change with altitude on a slider.
 >
-> Would next Tuesday or Wednesday afternoon work?
+> Would 15 minutes next Tuesday or Wednesday work?
 >
-> Best,
-> [Your name]
-> [TUM aerospace, 4th semester]
+> [Name] · TUM aerospace, 4th semester
 
-**TUM-internal targets first** (per ADR-013 outreach plan):
-
-- TUM Optics Chair (Photonics / Display Optics) — ADR-013 priority 1
-- TUM Aerospace Department mentors — your own department, lowest friction
-- TUM Observatory / Physics Department (Wendelstein) — domain experts
-- TUM Venture Labs (Aerospace or Robotics) — venture-stage support
-
-**EU astronomy departments** (broader Phase 4):
-
-- LMU Munich Observatory
-- ESO Garching (HQ next door — outreach team contact)
-- Heidelberg Königstuhl
-- ETH Zurich Astrophysics
-- Cambridge Institute of Astronomy
-- Leiden Observatory
+**TUM-internal first:** own aerospace department (lowest friction), TUM Observatory / Physics
+(Wendelstein), TUM Optics Chair. **Then:** LMU Observatory, ESO Garching outreach (next door),
+Heidelberg Königstuhl, ETH Zurich, Leiden, Cambridge IoA.
 
 ---
 
-## Template 3: AR-glasses OEMs (commercial dual-licensing)
+## Template 4 — Tier-3 validation (ADR-023) — send these regardless of everything else
+
+**These are not sales emails.** They exist to find out, cheaply, whether the "this is a star tracker
+and star trackers matter in aerospace" story survives contact with someone who works in the sector.
+A "no" here is worth as much as a "yes", because it kills a branch that would otherwise sit in the
+plan absorbing attention for a year. Send all three; they cost nothing and can go out before the
+launch.
+
+Send to: **(a)** your own chair / a professor in the department, **(b)** a REXUS contact,
+**(c)** one Munich space company — Isar Aerospace, OroraTech, or Reflex.
 
 **Subject:**
-> Native astronomy app for [Xreal NebulaOS / Viture / Rokid]?
+
+> Phone-based attitude determination — is this interesting?
 
 **Body:**
 
-> Hi [Name / partnerships@],
+> Hi [Name],
 >
-> [Specific sentence — recent launch, a feature you appreciate. e.g. "Picked up the One Pro at IFA — the electrochromic dimming is clearly the right architecture for the use case I'm building toward."]
+> [One specific sentence: their work, their launch, a lecture of theirs you sat in.]
 >
-> I'm developing Starlantern — a physically-correct astronomy overlay built on WebXR, currently shipping as a phone webapp with stereoscopic mode. Eventual target: native app for AR glasses with a forward-mounted astrometric camera.
+> I've built something as a consumer astronomy app that is, structurally, a star tracker: phone
+> camera → plate-solve → attitude determination → EKF fusion with the IMU. On an ordinary phone it
+> holds a median **{{N1_MEDIAN_ARCMIN}}′** with **{{N4_DRIFT_DEG_MIN}}°/min** of drift between
+> fixes. Demo: https://ar-night-sky.vercel.app, video [link].
 >
-> Live demo: https://starlantern.app
-> Stereo mode video: [link]
+> I'm not asking for anything and I'm not selling. I'd like a reality check from someone who works
+> in the field: is commodity-hardware celestial attitude determination interesting to anyone, and
+> if so where — GPS-denied navigation, cubesat ADCS, ground equipment, or nowhere because it's a
+> solved problem with four companies doing it better?
 >
-> Two reasons for this email:
+> A two-line answer, including "this is not interesting", would genuinely help me decide what to
+> spend the next year on.
 >
-> 1. Would [Xreal / Viture / Rokid] be open to providing a development unit for porting + testing? The phone version handles plate-solve + IMU fusion already; the port is mostly stereo-rendering + your SDK adapter.
-> 2. If a port lands, would commercial licensing for inclusion in the [NebulaOS / Viture App / Rokid] store be on the table? AGPL on the public repo, dual-licensed for commercial use; pricing in the €5-50k range per OEM/year depending on scope.
->
-> Happy to demo over a 30-minute call.
->
-> Best,
-> [Your name]
-> [TUM aerospace, 4th semester]
+> [Name] · TUM aerospace, 4th semester
 
-**Targets:**
-
-- Xreal (NebulaOS) — partnerships@xreal.com or via their developer portal
-- Viture — developer relations contact via viture.com
-- Rokid — partnerships via rokid.com
-- Meta Reality Labs (Ray-Ban Display, Quest) — long shot but high reward
-- Even Realities (G1) — niche, friendly to indies
-
-**Ticket size:** €5,000-50,000/year per OEM, structured as licensing + revenue share on store sales. Slow sales cycle (3-9 months) but enables MRR by getting featured in the store.
+**How to read the replies:** "solved problem, talk to X, Y, Z" → branch closed, and you got three
+names for free. "Interesting, what's your accuracy under vibration / at what update rate?" → branch
+open, and the follow-up question tells you what to measure next. Silence from all three → treat as
+a weak no; do not re-send.
 
 ---
 
 ## Tracking
 
-Recommend a single Google Sheet with columns:
+One sheet: `institution | contact | email | sent | replied | status | next-action | notes`
+Status values: `sent`, `replied`, `call-booked`, `pilot`, `paying`, `dead`.
 
-`institution | contact-name | contact-email | sent-date | reply-date | status | next-action | notes`
-
-Status values: `sent`, `replied`, `intro-call-booked`, `pilot-installed`, `paying`, `dead`.
-
-Realistic numbers: send 30 emails/quarter, expect 3-6 replies, 1-2 intro calls, 0-1 closes. That's normal. The first close is the hardest.
+Realistic: 30 emails/quarter → 3–6 replies → 1–2 calls → 0–1 closes. The first close is the hardest.

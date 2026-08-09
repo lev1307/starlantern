@@ -1,148 +1,209 @@
 # Reddit launch posts
 
-One post per subreddit. Each is tuned to the audience — astronomy subreddits care about photometric accuracy + plate-solve, /r/spaceporn cares about the visual, /r/space wants the broader story.
+> **Rewritten 2026-08-09 against ADR-016/017.** May drafts led with the render and the AR-glasses
+> roadmap. These lead with the lock. Placeholders `{{...}}` are unmeasured numbers — same rule as
+> the HN draft: fill from a real field run or delete the sentence.
 
-**Universal rules:**
-- Don't post all four on the same day (Reddit anti-spam catches it). Stagger over 4-7 days.
-- Always include the live URL **and** the demo video.
-- Lead with the video for visual subs (spaceporn, space). Lead with technical depth for astronomy subs.
-- Reply to comments for the first 6 hours after posting — comment activity is the ranking signal.
+```bash
+grep -n "{{" docs/marketing/reddit-posts.md && echo "STILL HAS PLACEHOLDERS — DO NOT POST"
+```
 
-Best posting time: **9-11am Eastern, weekdays.** Sunday evening also works for /r/space.
+**Universal rules**
+
+- Stagger over 4–7 days. Posting all of them the same day trips Reddit's anti-spam.
+- Always include the video. On Reddit the video _is_ the post; the link is secondary.
+- Reply for the first 6 hours — comment activity is the ranking signal.
+- URL is `https://ar-night-sky.vercel.app` until DNS for the custom domain works.
+- Best window: **9–11am Eastern, weekdays**; Sunday evening also works for r/space.
+- Read each sub's self-promotion rule before posting. r/telescopes and r/astronomy both remove
+  posts that read as launches; framing as "built this, want criticism" survives where "check out
+  my app" does not.
 
 ---
 
-## /r/astronomy
+## r/telescopes — highest-value audience, post this one first
 
-**Flair:** "Astrophotography" or "Equipment / Tools" depending on which is allowed for non-photo posts (check sidebar; some only allow photos via flair).
+These are the people who spend four figures on gear and own manual Dobsonians with no goto. Feature
+priority #1 (mount-agnostic push-to) is aimed squarely at them, and this post **tests demand for it
+before it gets built** — which is worth more than the traffic.
 
 **Title:**
 
-> Built a webapp that overlays a physically-correct night sky on your phone, locked to reality via camera plate-solving — feedback wanted
+> My phone app plate-solves the sky instead of trusting the compass — would a mount-agnostic push-to be useful to you?
 
 **Body:**
 
-> Hey r/astronomy. I've been building this in evenings/weekends for a few months and I'm at the point where I want to know if astronomers think the rendering is doing the right thing.
+> I got tired of phone sky apps pointing at the wrong star. They take orientation from the
+> magnetometer, which drifts 5–20° around metal — useless next to a telescope.
 >
-> **Live demo:** https://starlantern.app (best on a phone, outside, after dark — but desktop preview works if you crank Bortle to 1 and Exposure to 3, then drag to look around).
+> So this one takes a photo, plate-solves it, and fuses that with the IMU through a Kalman filter.
+> Measured on a real night: median correction **{{N1_MEDIAN_ARCMIN}}′**, drift
+> **{{N4_DRIFT_DEG_MIN}}°/min** between solves, first lock in **{{N5_TTFL_SEC}} s**. There's a live
+> readout on screen showing the current uncertainty, so you can see it degrade rather than trust me.
 >
-> **Video:** [link to your demo video]
+> Free, works in a phone browser, no install: https://ar-night-sky.vercel.app
+> Video: [link]
 >
-> What it tries to do differently from Stellarium / SkyView / Star Walk:
+> **The actual question.** I know StarSense Explorer does phone plate-solving as a push-to aid, but
+> it's locked to Celestron mounts. There are an awful lot of manual Dobs and EQ mounts out there
+> with no goto at all.
 >
-> - **Plate-solve lock.** Phone-camera image → astrometry.net → MEKF fuses the solution with IMU readings. Compass alone drifts 5-20° from indoor metal; this should hold within ~1 arcminute.
-> - **Photometric pipeline.** Per-star Moffat PSF, B-V → Teff → linear-sRGB color, scotopic Purkinje desaturation toward neutral at low flux, Kasten-Young extinction, Hayes-Latham wavelength-dependent reddening near the horizon. 8920-star Gaia DR3 subset down to mag 6.5.
-> - **Bortle-aware.** GPS → light-pollution lookup → global gain compensation so faint stars stay above urban skyglow. Manual Bortle slider lets you preview Bortle 1 from your light-polluted backyard.
-> - **What's actually up tonight.** SGP4 ISS/CSS/HST passes, calendar-aware meteor showers, 21 naked-eye DSOs, Milky Way + zodiacal + gegenschein + Belt of Venus + air-glow.
+> Would a mount-agnostic version be useful — you put the phone on the tube, pick a target, and it
+> walks you there with live nudge arrows? Or is the phone-on-the-scope ergonomics bad enough that
+> you'd never use it in practice? I'd rather hear "no" now than build it and find out.
 >
-> Currently working on AR-glasses port (Viture Pro / Xreal One Pro) but the phone webapp is the v1 deliverable.
->
-> **Specific questions for you:**
->
-> 1. Is the B-V → color mapping correct? Does Arcturus look the right shade of orange to your eye?
-> 2. Bortle slider — at Bortle 1 with the Milky Way + DSOs visible, does the relative brightness feel right?
-> 3. Anything obviously wrong about the meteor distribution (ZHR scaling, sporadic vs shower mix)?
->
-> Open to harsh feedback. Code is AGPL on GitHub if you want to look at the math.
+> Also happy to be told the accuracy numbers are measured wrong. Code is AGPL if you want to check
+> the math.
 
 ---
 
-## /r/Stargazing
+## r/astronomy — technical scrutiny
 
 **Title:**
 
-> Built a free phone webapp that shows you what your sky would look like at a perfect dark site — even from inside a city
+> Built a phone sky overlay that plate-solves instead of trusting the magnetometer — looking for criticism of how I measure the accuracy
 
 **Body:**
 
-> Hi r/Stargazing! Frustrated with my city sky in Munich (Bortle 5-6) and built this so I could preview what the night looks like at Bortle 1 from anywhere.
+> r/astronomy — I've been building this for a few months and I'd like the measurement methodology
+> torn apart before I quote it anywhere else.
 >
-> **Try it:** https://starlantern.app — works in any phone browser, no install.
+> **What it does:** phone camera photographs the sky → astrometry.net solve → the solution is fused
+> with IMU readings through a multiplicative EKF over [δθ, δb]. The camera provides the absolute
+> reference, so the overlay doesn't inherit magnetometer bias.
 >
-> **Demo video:** [link]
+> **What I measure, and how.** I deliberately do _not_ quote the filter's own covariance — a
+> filter's σ says how confident it is, not how right it is, and an overconfident filter reports a
+> small σ while accumulating real error. Instead I log the **innovation**: when the next solve
+> lands, how far does it move the estimate? That's the drift that actually accumulated between
+> fixes. On a real night: median **{{N1_MEDIAN_ARCMIN}}′**, p95 **{{N2_P95_ARCMIN}}′**, drift
+> **{{N4_DRIFT_DEG_MIN}}°/min**, solve rate **{{N3_SOLVE_RATE}}**.
 >
-> What it does:
+> Is that the right way to characterise this, or is there a standard treatment I should be using?
+> This is the number the whole thing rests on and I'd rather be corrected now.
 >
-> - Point your phone at the sky → get a star overlay locked to reality (uses your camera + GPS + IMU)
-> - Slide Bortle from 9 (city) down to 1 (perfect dark site) and watch the Milky Way emerge, faint stars appear, DSOs become visible
-> - Shows the moon (with phase + mare), planets, ISS passes, meteor showers, even Belt of Venus during twilight
-> - Currently free and AGPL-licensed
+> **Rendering** (secondary, but I'd take feedback): per-star Moffat PSF, B−V → Teff → linear-sRGB,
+> scotopic desaturation, Kasten-Young extinction, Hayes-Latham wavelength-dependent reddening near
+> the horizon. Gaia subset to mag 6.5. Deliberately naked-eye only — no constellation lines, no
+> labels over the sky.
 >
-> Best experience is outdoors at night with motion + GPS granted, but you can preview in a browser by setting your system clock forward and dragging to look around.
+> Live: https://ar-night-sky.vercel.app · Video: [link] · Code: AGPL-3.0
 >
-> Built it as a phone prototype for an eventual AR-glasses port (Viture / Xreal / Rokid). Would love feedback from people who actually use sky apps regularly — what feels off, what's missing, what would make you switch from your current app.
+> Specific questions: (1) does the B−V → colour mapping look right to your eye on Arcturus and
+> Rigel? (2) at Bortle 1, do relative brightnesses feel plausible? (3) is the extinction curve
+> doing the right thing below 20° altitude?
 
 ---
 
-## /r/spaceporn
+## r/Stargazing — practical, non-technical
 
 **Title:**
 
-> [OC] Free webapp shows you the night sky as it would look at a perfect dark site, from anywhere — including DSOs, Milky Way, Belt of Venus, ISS passes
-
-**Body (for spaceporn the video IS the post — keep text short):**
-
-> Live demo: https://starlantern.app
->
-> Built this from scratch in TypeScript + Three.js — physically-correct rendering of stars (Gaia DR3 catalog, B-V color, atmospheric extinction), Milky Way, planets, meteors, satellites, aurora, and more. Free + open-source (AGPL).
->
-> Best on a phone outdoors but desktop preview works — set Bortle to 1 and Exposure to 3 to see the dark-sky version.
-
-(spaceporn rules require image/video for the post itself — use a 30s rendered clip, or a screenshot of M31 + Pleiades + Milky Way taken from your tonight outdoor test, with `[OC]` tag.)
-
----
-
-## /r/space
-
-**Title:**
-
-> I built a free webapp that shows what the night sky would look like at a perfect dark site, locked to reality via your phone's camera — feedback welcome
+> Free phone app that actually points where you're pointing — no install, works in the browser
 
 **Body:**
 
-> Hi r/space. Solo founder here, 4th-semester aerospace student. Spent the last few months building a WebXR night-sky overlay with the goal of porting it to AR glasses (Viture / Xreal) once optics catch up.
+> Every sky app I've tried has the same problem: hold the phone up, and the labels sit a
+> constellation away from where they should be. That's the compass being pulled around by metal.
 >
-> The phone webapp is the v1 deliverable, fully working today: https://starlantern.app
+> This one photographs the sky and works out where it's looking from the stars themselves, the way
+> a spacecraft does. Point it, tap "Lock to sky", and the overlay stays put. There's a little badge
+> that tells you how accurate it currently is, in arcminutes.
 >
-> **Demo video:** [link]
+> https://ar-night-sky.vercel.app — no install, works in any phone browser.
+> Video: [link]
 >
-> **Highlights:**
+> It also renders what the sky _would_ look like from a dark site: drag the Bortle slider from 9
+> down to 1 and the Milky Way comes out. Moon phase, planets, ISS passes and meteor showers are all
+> real-time rather than decorative.
 >
-> - Phone camera takes a sky photo → plate-solves it via astrometry.net → fuses with your phone's gyroscope through an EKF, locks the overlay to within an arcminute of real stars
-> - Renders 8,920 stars from Gaia DR3 with physically-correct color (from B-V index), brightness, twinkle, and atmospheric reddening near the horizon
-> - Shows ISS / CSS / HST passes via SGP4 propagation, current planets via VSOP87 Keplerian elements, all 8 major meteor showers with calendar-driven activity
-> - Bortle 1 to 9 slider lets you compare your light-polluted sky to a perfect dark site
-> - Aurora model with live NOAA SWPC Kp index data
-> - Stereoscopic mode for cardboard headmounts
->
-> Open-source (AGPL-3.0), TypeScript + Three.js + WebGL2.
->
-> Honest about state: it's a v1 prototype, the AR-glasses version is years out (waiting for electrochromic optics), and it works best outdoors at night with motion permissions granted. But every line of the rendering is physically motivated and the math is testable (146 tests pass).
->
-> Curious what r/space thinks. Especially: is there demand for "see the sky as it would look at a perfect dark site" as a paid mobile app, or is the free webapp enough?
+> Free and open-source. Built it because I live under Munich's Bortle 5–6 sky and wanted to see what
+> I'm missing. Would like to hear what feels wrong to people who use sky apps regularly.
 
 ---
 
-## After-the-fact: replies template
+## r/space — broad audience, story angle
 
-People will ask:
+**Title:**
 
-**"How is this different from Stellarium?"**
+> I built a phone app that determines its orientation from starlight instead of the compass — the same way a spacecraft does
 
-> Stellarium is a fantastic catalog/atlas + simulator. This is built around the plate-solve lock — your phone camera tells the app what it's actually looking at, instead of relying on the (notoriously unreliable) magnetometer. Drift is ~1 arcminute vs 5-20° for compass-only apps.
+**Body:**
 
-**"Is this open-source / can I run it locally?"**
+> Aerospace student here. Spacecraft don't use magnetometers to know which way they're pointing —
+> they use star trackers: photograph the sky, match the pattern against a catalogue, derive
+> attitude. I wanted to know whether a phone could do the same thing well enough to be useful.
+>
+> It can. The app photographs the sky, plate-solves it, and fuses the result with the phone's gyro
+> through a Kalman filter. Where a typical sky app drifts 5–20° on magnetometer noise, this holds
+> to **{{N1_MEDIAN_ARCMIN}}′** with **{{N4_DRIFT_DEG_MIN}}°/min** of drift between fixes, and it
+> shows you that number live instead of asking you to trust it.
+>
+> Try it: https://ar-night-sky.vercel.app (phone browser, no install)
+> Video: [link]
+>
+> The rest of it renders the naked-eye sky as it would appear at a perfect dark site — Gaia
+> catalogue, physically-motivated star colour and atmospheric extinction, real planet and ISS
+> positions, calendar-accurate meteor showers.
+>
+> Open-source, AGPL-3.0, TypeScript + Three.js. Happy to answer questions about the attitude
+> determination — it's the interesting part.
 
-> Yes — AGPL-3.0 on GitHub. `npm install && npm run dev` and you have it on your laptop. Plate-solve needs a free astrometry.net key, everything else works without any backend.
+---
 
-**"Are you going to make a mobile app?"**
+## r/spaceporn — optional, lowest priority
 
-> Yes — Capacitor wrapper for Google Play + iOS App Store is the next step. Pricing target ~€5/month or €69 lifetime. The core stays AGPL/free; mobile app is for convenience + push notifications + offline + premium hosted features.
+Included for completeness, but note the tension: spaceporn rewards **beauty**, which is the
+positioning ADR-017 says not to compete on. Post it only if the video happens to be gorgeous, and
+treat it as reach rather than as a message that will convert. Requires image/video in the post
+itself, `[OC]` tagged.
 
-**"Will it work on AR glasses?"**
+**Title:**
 
-> That's the long bet. Current consumer AR glasses (Xreal, Viture, Rokid) lack the brightness floor + electrochromic dimming needed for true astronomy use. Phone-tethered USB-C DP-alt mode works in principle. Year 2-3 we'll borrow a unit and validate.
+> [OC] The sky over Munich as it would look at Bortle 1 — rendered live on a phone from the Gaia catalogue
 
-**"This drains battery / overheats my phone."**
+**Body:**
 
-> Yes — that's why the long-term play is AR-glasses-with-phone-as-compute. Phone in a cardboard headmount works for 30-60 min before getting warm; AR glasses with their own thermal envelope are the real solution.
+> Live and free: https://ar-night-sky.vercel.app
+>
+> Rendered in real time in a phone browser — real star colours from B−V index, atmospheric
+> extinction, Milky Way, zodiacal light. The overlay is locked to the real sky by plate-solving the
+> phone camera, so it stays put when you move.
+
+---
+
+## Reply templates
+
+**"How is this different from Stellarium / SkySafari?"**
+
+> They're better catalogues and I'm not trying to beat them there — Stellarium goes to magnitude 22.
+> The difference is the pointing. They derive orientation from the magnetometer and drift 5–20°;
+> this plate-solves the camera image and holds arcminutes, and shows you the current number on
+> screen. If you want an atlas, use Stellarium. If you want the overlay to sit on the actual star,
+> this is the trade.
+
+**"Doesn't StarSense Explorer already do this?"**
+
+> Yes, and it's good — it's the proof people want phone plate-solving as a telescope aid. It's tied
+> to Celestron's mounts and their bracket. The gap I'm aiming at is mount-agnostic: any manual Dob
+> or EQ, no proprietary hardware.
+
+**"Does it work offline?"**
+
+> Not yet, and that's the honest weak spot: solving currently round-trips to astrometry.net, so it
+> needs signal — exactly wrong for a dark site. Moving the solver on-device via WASM is the next
+> substantial piece of work. Everything else (rendering, catalogue, ephemerides) is already local.
+
+**"Is it open source?"**
+
+> AGPL-3.0. `npm install && npm run dev` runs it locally. Solving needs a free astrometry.net key;
+> nothing else needs a backend.
+
+**"Will there be an app?"**
+
+> Android first, probably €15–20 one-time. The web version stays free.
+
+**"Battery / heat?"**
+
+> Real cost. It solves on demand rather than running the camera continuously, which is why locking
+> is a button and not a mode.

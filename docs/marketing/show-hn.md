@@ -1,77 +1,148 @@
 # Show HN draft
 
-Post when you have a 30-60s outdoor demo video uploaded somewhere (YouTube unlisted, Vimeo, or directly to a tweet you can link).
+> **Rewritten 2026-08-09 against ADR-016/017.** The May version sold a feature list and an
+> AR-glasses future. The claim now is the **lock**: every mainstream sky app drifts 5–20° on
+> magnetometer noise; this one plate-solves and holds arcminutes.
 
 ---
 
-## Title (≤ 80 chars, HN strict)
+## 🔴 DO NOT POST WITH PLACEHOLDERS IN IT
 
-Pick one. Test the first; have the second as a backup if it dies in /newest.
+This draft contains `{{...}}` tokens for numbers that **have not been measured yet**. They are
+deliberately not filled with plausible-looking values, because a fabricated accuracy number is the
+one mistake this project cannot recover from — the entire positioning is "we measure this and they
+don't". Fill them from a real field run (see `shot-list.md`), or delete the sentence containing them.
 
-1. **Show HN: Starlantern – stargazing overlay locked to reality via plate-solving**
-2. **Show HN: A WebXR night sky that locks to real stars via phone-camera plate-solving**
+Guard before posting:
 
-Keep "Show HN:" prefix exactly. HN moderators enforce it.
+```bash
+grep -n "{{" docs/marketing/show-hn.md && echo "STILL HAS PLACEHOLDERS — DO NOT POST"
+```
+
+| Token                  | What it is                                  | Where it comes from                               |
+| ---------------------- | ------------------------------------------- | ------------------------------------------------- |
+| `{{N1_MEDIAN_ARCMIN}}` | median attitude correction at re-solve      | `accuracy.stats` telemetry, median of innovations |
+| `{{N2_P95_ARCMIN}}`    | p95 of the same                             | same log, 95th percentile                         |
+| `{{N3_SOLVE_RATE}}`    | solve success rate, with visible-star count | `platesolve.success` ÷ `platesolve.start`         |
+| `{{N4_DRIFT_DEG_MIN}}` | EKF drift °/min between solves              | `measured_drift_deg_per_min`                      |
+| `{{N5_TTFL_SEC}}`      | time to first lock                          | `timeToFirstLockSec`                              |
 
 ---
+
+## Title (≤ 80 chars — HN enforces)
+
+1. **Show HN: A sky app that plate-solves so the overlay doesn't drift**
+2. **Show HN: Star overlay locked by plate-solving, not the magnetometer**
+
+Keep the `Show HN:` prefix exactly. Lead with the mechanism, not the name — nobody knows the name.
 
 ## URL field
 
-`https://starlantern.app`
+`https://ar-night-sky.vercel.app`
 
-(If you've renamed the repo to `starlantern`, you can either keep the old subdomain or migrate first — but don't do both at once on launch day.)
+Launching on the vercel.app URL deliberately: `starlantern.app` does not resolve, and a dead link
+in a Show HN post is unrecoverable. **Do not rename the Vercel project after posting** — the URL is
+derived from the project name.
 
 ---
 
 ## Comment (post immediately as the first comment)
 
-> Hi HN! I'm a 4th-semester aerospace student building this as a phone prototype for an eventual AR-glasses astronomy product. The webapp is the v1 deliverable.
+> Every phone sky app I've used has the same failure: you point at a star, and the label sits
+> somewhere else. They derive orientation from the magnetometer, which is pulled around by the
+> metal in your phone, your car, your balcony railing. In normal use that's 5–20° of error — a
+> couple of constellations' worth.
 >
-> What it does:
+> This one takes a photo of the sky, plate-solves it, and fuses the solution with the IMU through
+> a multiplicative EKF. The camera tells the app what it is actually looking at, so the overlay is
+> anchored to the sky rather than to a guess about which way is north.
 >
-> - **Plate-solve lock.** Capture a sky image from the phone camera, solve via astrometry.net, fuse with IMU through a multiplicative EKF for arcminute-accurate overlay. Most sky apps drift 5-20° from magnetometer noise; this locks to within ~1 arcminute.
-> - **Photometric rendering.** Per-star Moffat PSF, B-V → Teff → linear-sRGB color, scotopic desaturation, Kasten-Young extinction, wavelength-dependent reddening near the horizon (Sirius rising actually looks orange-yellow, then white-blue as it climbs). 8920-star Gaia DR3 subset (mag ≤ 6.5).
-> - **Bortle-aware sky.** GPS → light-pollution lookup → global gain so faint stars stay visible above urban skyglow. Slider lets you preview Bortle 1 (perfect dark site) on top of your actual location.
-> - **What's actually in the sky right now.** Sun + moon (with phase, mare, earthshine), VSOP87-truncated planets, ISS / CSS / HST via SGP4 from CelesTrak TLEs, calendar-aware meteor showers (sporadic + 8 majors), 21 naked-eye DSOs, Milky Way + zodiacal light + gegenschein + Belt of Venus + air-glow + adaptation glare on bright stars. Aurora model with live NOAA SWPC Kp index for high-latitude observers.
-> - **Stereoscopic mode** for cardboard-style headmounts via WebXR `immersive-vr` opt-in.
+> **What I measured** (Munich, {{FIELD_DATE}}, Bortle {{FIELD_BORTLE}}):
 >
-> Best experience is on a phone, outdoors, dark site. Browser desktop preview works too — set Bortle 1, Exposure 3, drag-look around. UTC slider would help here; for now if your local time is daytime, set the system clock forward to test.
+> - Time to first lock: **{{N5_TTFL_SEC}} s**
+> - Attitude correction at re-solve: **median {{N1_MEDIAN_ARCMIN}}′, p95 {{N2_P95_ARCMIN}}′**
+> - Drift between solves: **{{N4_DRIFT_DEG_MIN}}°/min**
+> - Solve success rate: **{{N3_SOLVE_RATE}}**
 >
-> Stack: TypeScript + Three.js + WebGL2 shaders + Vite. ~9k LOC, 146 tests, AGPL-3.0. Vercel auto-deploys; plate-solve is proxied through a serverless function (free astrometry.net Nova key required server-side).
+> A note on how that middle number is derived, because it's the one that matters and it's easy to
+> fake. I don't quote the EKF's own covariance — a filter's self-reported σ tells you how confident
+> it is, not how right it is, and an overconfident filter reports a small σ while accumulating real
+> error. Instead I log the **innovation**: when the next plate-solve lands, how far did it have to
+> move the estimate? That's the drift that actually accumulated. Both numbers are recorded so they
+> can be compared; if they diverge, the filter is mis-tuned and I want to know.
 >
-> Long-term: this becomes the same code compiled and sold on Google Play / Xreal NebulaOS / Viture store as the AR-glasses optics catch up over the next 5-10 years. The webapp is the practice ground.
+> The app shows this live. There's a badge with the current attitude uncertainty in arcminutes,
+> and it goes amber and then red as it degrades. I'd rather show the number than claim a
+> capability.
 >
-> Specifically curious about feedback from:
+> **Honest about what it isn't:**
 >
-> - Astronomers on whether the photometric model is doing the right thing
-> - WebXR / Three.js folks on the stereo + barrel-distortion path (broken on some Cardboard variants?)
-> - Anyone who's done plate-solve fusion with IMU on a phone — current EKF is MEKF over [δθ, δb], curious what others have used
+> - Plate-solving currently round-trips to astrometry.net, so it needs signal — which is exactly
+>   wrong for dark sites. Porting a lost-in-space solver to WASM to run on-device is the next
+>   real piece of work, and it also removes the server, the latency and most of the privacy
+>   surface.
+> - Accuracy between solves depends on your phone's gyro. Cheap IMUs drift faster.
+> - It is not a catalogue. Stellarium goes to magnitude 22 and has a decade of head start; I'm not
+>   competing there. This renders naked-eye sky (Gaia subset, mag ≤ 6.5, ~9k stars) and spends its
+>   effort on pointing correctly.
+>
+> The rendering is physically motivated rather than decorative: per-star Moffat PSF, B−V → Teff →
+> linear-sRGB colour, scotopic desaturation, Kasten-Young extinction, Hayes-Latham wavelength-
+> dependent reddening near the horizon (so a rising Sirius goes orange → white-blue as it climbs).
+> Light-pollution compensation from your GPS position, with a Bortle slider so you can see what
+> your sky would look like at a dark site.
+>
+> TypeScript + Three.js + WebGL2, ~9k LOC, 171 tests, AGPL-3.0. Works in a phone browser, no
+> install. Desktop preview works too — drag to look around, set Bortle 1 and Exposure 3.
+>
+> Things I'd genuinely like scrutiny on:
+>
+> - Anyone who's done plate-solve/IMU fusion on commodity hardware: the filter is a MEKF over
+>   [δθ, δb]. What did you use, and where did it bite you?
+> - Is innovation-as-drift-measurement the right call, or is there a standard I should be using
+>   instead? I'd rather be corrected now than quote a bad number for a year.
+> - Astronomers: is the photometric chain doing what you'd expect?
 
 ---
 
 ## Tone notes
 
-- HN punishes hype. Keep claims falsifiable.
-- Lead with the plate-solving since that's the technical moat (every other star app drifts).
-- Explicitly invite scrutiny — "curious about feedback from..." is honored as engagement-positive.
-- Don't apologize for the name / domain / WIP-ness. Confidence reads competent.
-- If anyone asks about monetization: be honest. "AGPL on GitHub, planning paid Android/iOS apps and commercial dual-licensing for OEMs."
+- HN punishes hype and rewards falsifiability. Every claim here is a number or a mechanism.
+- **Lead with the problem, not the product.** "You point at a star and the label sits somewhere
+  else" is a shared experience; "physically-correct photometric rendering" is a feature list.
+- Stating limitations up front is not weakness here — it's the strongest available signal that the
+  numbers you _do_ quote are real. The network-dependency admission buys credibility for the
+  accuracy claim.
+- Do not mention AR glasses. It reads as a pivot away from the thing that works, and it invites
+  "so it's a prototype for something else?" — the app is the product (ADR-016).
+- If asked about money: "AGPL on GitHub. I'm planning a paid Android build around €15–20 one-time;
+  the web version stays free." Don't volunteer it.
+
+## Anticipated hard questions
+
+**"Arcminutes? Prove it."** → The methodology paragraph above, plus: the app logs it live and you
+can watch the badge. Long-term answer is the synthetic closed loop (render a field at known truth →
+solve it → compare), which runs in CI and is not yet built. Say that plainly if asked.
+
+**"Why not just use the compass better / sensor fusion is a solved problem."** → Fusion doesn't fix
+a biased sensor. Hard-iron and soft-iron distortion near a phone's own speaker and battery is a
+bias, not noise; averaging it doesn't remove it. Plate-solving replaces the absolute reference.
+
+**"Stellarium has plate-solving."** → Stellarium desktop drives telescope mounts and can plate-solve
+via external tooling; the phone apps don't do this in the pointing loop. If someone shows me one
+that does, that's genuinely useful information — say so rather than arguing.
+
+**"Battery/heat."** → Real. Continuous camera + WebGL is expensive; the app solves on demand rather
+than continuously, which is why lock is an action and not a mode.
 
 ## When to post
 
-- Best HN slot: **Tuesday-Thursday, 8-10am Pacific** (matches lunch in EU, breakfast in US East).
-- Avoid weekends, holidays, big news days.
-- Stay around for ~2 hours after to answer comments. First-hour comments dramatically affect ranking.
+- **Tuesday–Thursday, 8–10am Pacific.** Avoid weekends and big news days.
+- Post the video and the URL. Stay available for ~2 hours; first-hour comments drive ranking.
+- Reply to every substantive comment in the first 4 hours. Save the thread — it is grant-application
+  and cold-email material.
 
-## What to do if it pops
+## If it dies
 
-- Have GitHub Sponsors + Ko-fi already enabled (FUNDING.yml is in the repo, you just need to apply for Sponsors).
-- Don't link to a paid product. The "buy this" CTA kills HN posts. Let people use the live URL freely.
-- Reply to every substantive comment in the first 4 hours.
-- Save the conversation — it's grant-application gold.
-
-## What to do if it dies
-
-- Don't repost the same URL within a month — HN penalizes.
-- Pivot to Reddit (see `reddit-posts.md` — those have less strict gatekeeping).
-- The video alone is reusable for Twitter / LinkedIn forever.
+Don't repost the same URL within a month. Move to Reddit (`reddit-posts.md`), which has softer
+gatekeeping, and keep the video — it's reusable indefinitely.
