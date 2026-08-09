@@ -25,11 +25,13 @@ trackBoot();
 // --- Layout ---------------------------------------------------------------
 app.innerHTML = `
   <canvas id="sky"></canvas>
+  <button id="hud-toggle" type="button" aria-label="Toggle HUD" title="Show/hide HUD">⌃</button>
   <div id="hud">
     <div id="status" class="hud-card">
       <div class="hud-row"><span class="lbl">Location</span><span id="loc">—</span></div>
       <div class="hud-row"><span class="lbl">Heading</span><span id="hdg">—</span></div>
       <div class="hud-row"><span class="lbl">UTC</span><span id="utc">—</span></div>
+      <div class="hud-row"><span class="lbl">Sun alt</span><span id="sun-alt">—</span></div>
       <div class="hud-row"><span class="lbl">Pointing</span><span id="pick">—</span></div>
     </div>
     <div id="controls" class="hud-card">
@@ -52,6 +54,15 @@ app.innerHTML = `
         Kp (aurora)
         <input id="kp" type="range" min="0" max="9" step="0.1" value="3" />
         <span id="kp-val">3.0</span>
+      </label>
+      <label>
+        Realism (1 = eye, 0 = camera)
+        <input id="realism" type="range" min="0" max="1" step="0.01" value="1" />
+        <span id="realism-val">1.00</span>
+      </label>
+      <label class="preview-night-label">
+        <input id="preview-night" type="checkbox" />
+        <span>Preview night sky (override clock)</span>
       </label>
       <details class="stereo-details">
         <summary>Stereo (headmount)</summary>
@@ -123,6 +134,16 @@ style.textContent = `
     padding: 0.65rem 0.85rem; color: #ddd;
     max-width: 320px;
   }
+  #hud-toggle {
+    position: fixed; top: 0.6rem; right: 0.6rem; z-index: 5;
+    width: 2.2rem; height: 2.2rem; padding: 0; flex: none;
+    border-radius: 50%; font-size: 1.1rem; line-height: 1;
+    background: rgba(0,0,0,0.55); color: #ddd;
+    border: 1px solid rgba(255,255,255,0.15); backdrop-filter: blur(6px);
+    cursor: pointer; user-select: none;
+  }
+  #hud-toggle.hud-collapsed { opacity: 0.35; }
+  #hud.hud-hidden .hud-card { display: none; }
   .hud-row { display: flex; justify-content: space-between; gap: 1rem; }
   .lbl { opacity: 0.5; }
   #controls label { display: block; }
@@ -134,12 +155,12 @@ style.textContent = `
     padding: 0.45rem 0.6rem; font: inherit; cursor: pointer;
   }
   button:hover { background: rgba(255,255,255,0.14); }
-  .auto-lock-label {
+  .auto-lock-label, .preview-night-label {
     display: flex !important; align-items: center; gap: 0.5rem;
     margin-top: 0.5rem; cursor: pointer; user-select: none;
     font-size: 12px; opacity: 0.8;
   }
-  .auto-lock-label input { width: auto; margin: 0; }
+  .auto-lock-label input, .preview-night-label input { width: auto; margin: 0; }
   .stereo-details { margin-top: 0.5rem; }
   .stereo-details summary { cursor: pointer; opacity: 0.7; font-weight: 500; }
   .stereo-details[open] summary { opacity: 1; }
@@ -171,6 +192,7 @@ const sensors = new SensorHub();
 const $loc = document.getElementById("loc")!;
 const $hdg = document.getElementById("hdg")!;
 const $utc = document.getElementById("utc")!;
+const $sunAlt = document.getElementById("sun-alt")!;
 const $pick = document.getElementById("pick")!;
 const $offset = document.getElementById("offset") as HTMLInputElement;
 const $offsetVal = document.getElementById("offset-val")!;
@@ -185,6 +207,14 @@ const $unlock = document.getElementById("unlock-btn") as HTMLButtonElement;
 const $lockStatus = document.getElementById("lock-status")!;
 const $ekfStatus = document.getElementById("ekf-status")!;
 const $autoLock = document.getElementById("auto-lock") as HTMLInputElement;
+const $hud = document.getElementById("hud")!;
+const $hudToggle = document.getElementById("hud-toggle") as HTMLButtonElement;
+$hudToggle.addEventListener("click", () => {
+  const hidden = $hud.classList.toggle("hud-hidden");
+  $hudToggle.classList.toggle("hud-collapsed", hidden);
+  $hudToggle.textContent = hidden ? "⌄" : "⌃";
+  track("hud.toggle", { hidden });
+});
 
 const camera = new CameraCapture();
 const solver = new PlateSolver();
@@ -213,11 +243,25 @@ const $exposure = document.getElementById("exposure") as HTMLInputElement;
 const $exposureVal = document.getElementById("exposure-val")!;
 const $kp = document.getElementById("kp") as HTMLInputElement;
 const $kpVal = document.getElementById("kp-val")!;
+const $realism = document.getElementById("realism") as HTMLInputElement;
+const $realismVal = document.getElementById("realism-val")!;
+const $previewNight = document.getElementById(
+  "preview-night",
+) as HTMLInputElement;
+
+// Optional clock override for daytime testing. When set, all setSky() calls
+// use this instead of the real wall clock so the renderer paints the sky as
+// it would look at the chosen instant — lets the user verify Bortle, Milky
+// Way, twilight, etc., while the actual sun is up outside.
+let previewClockMs: number | null = null;
+function nowDate(): Date {
+  return previewClockMs == null ? new Date() : new Date(previewClockMs);
+}
 
 function refreshSky(): void {
   const fix = sensors.getLocation();
   if (fix)
-    renderer.setSky({ latDeg: fix.latDeg, lonDeg: fix.lonDeg }, new Date());
+    renderer.setSky({ latDeg: fix.latDeg, lonDeg: fix.lonDeg }, nowDate());
 }
 
 // Kick off the full HYG (~8920 stars, mag ≤ 6.5) catalog load. Until the
@@ -270,6 +314,35 @@ $kp.addEventListener("input", () => {
   $kpVal.textContent = renderer.state.kp.toFixed(1);
   refreshSky();
   track("slider.kp", { value: renderer.state.kp, source: "user" });
+});
+
+$realism.addEventListener("input", () => {
+  renderer.state.realism = parseFloat($realism.value);
+  $realismVal.textContent = renderer.state.realism.toFixed(2);
+  refreshSky();
+  track("slider.realism", { value: renderer.state.realism });
+});
+
+// "Preview night sky" — for daytime testing of Bortle / Milky Way / DSOs. When
+// checked, we freeze the renderer's clock at the next astronomical midnight
+// (UTC) at the observer's longitude — sun ~12° below horizon, full darkness.
+$previewNight.addEventListener("change", () => {
+  if (!$previewNight.checked) {
+    previewClockMs = null;
+    track("preview_night.off");
+  } else {
+    const fix = sensors.getLocation();
+    const lonDeg = fix?.lonDeg ?? 0;
+    // Local apparent midnight: rotate UTC so the sun is anti-meridian.
+    const utcHourAtLocalMidnight = (24 - lonDeg / 15) % 24;
+    const d = new Date();
+    d.setUTCHours(Math.floor(utcHourAtLocalMidnight), 0, 0, 0);
+    // If that midnight is in the past for today, that's fine — sky math only
+    // cares about the absolute instant, and the renderer renders it.
+    previewClockMs = d.getTime();
+    track("preview_night.on", { iso: d.toISOString() });
+  }
+  refreshSky();
 });
 
 // Pull the live Kp from NOAA SWPC via /api/kp on load (and every 10 min while
@@ -393,6 +466,12 @@ sensors.onRotationRate((r) => {
   //   alpha = rotation around Z (screen-perpendicular)
   //   beta  = rotation around X (top-to-bottom)
   //   gamma = rotation around Y (left-to-right)
+  // NOTE: this is raw device-body frame. The EKF's body is the camera-axis
+  // frame (post tilt+mirror), so there's a known frame mismatch here that
+  // surfaces if the EKF drives the camera pre-plate-solve. Today the EKF
+  // is only allowed to drive the camera AFTER a plate-solve lock, which
+  // pulls the state back to ground-truth often enough to mask the drift.
+  // Fixing the mismatch properly is a dedicated refactor (separate task).
   const DEG = Math.PI / 180;
   const omega: [number, number, number] = [
     r.betaDps * DEG,
@@ -436,7 +515,7 @@ async function start(): Promise<void> {
       accuracy_m: fix.accuracyM,
       alt_m: fix.altM,
     });
-    renderer.setSky({ latDeg: fix.latDeg, lonDeg: fix.lonDeg }, new Date());
+    renderer.setSky({ latDeg: fix.latDeg, lonDeg: fix.lonDeg }, nowDate());
   } catch (err) {
     track("permission.geolocation", {
       result: "denied_or_failed",
@@ -445,7 +524,7 @@ async function start(): Promise<void> {
     });
     // Default: Munich (TUM, where the founder is). Manual override available.
     sensors.setManualLocation(48.1486, 11.5675, 520);
-    renderer.setSky({ latDeg: 48.1486, lonDeg: 11.5675 }, new Date());
+    renderer.setSky({ latDeg: 48.1486, lonDeg: 11.5675 }, nowDate());
   }
 
   // Desktop fallback for testing without a phone.
@@ -455,7 +534,7 @@ async function start(): Promise<void> {
   setInterval(() => {
     const fix = sensors.getLocation();
     if (fix)
-      renderer.setSky({ latDeg: fix.latDeg, lonDeg: fix.lonDeg }, new Date());
+      renderer.setSky({ latDeg: fix.latDeg, lonDeg: fix.lonDeg }, nowDate());
   }, 30_000);
 }
 
@@ -787,7 +866,7 @@ $manual.addEventListener("click", () => {
     return;
   }
   sensors.setManualLocation(parts[0]!, parts[1]!, 0);
-  renderer.setSky({ latDeg: parts[0]!, lonDeg: parts[1]! }, new Date());
+  renderer.setSky({ latDeg: parts[0]!, lonDeg: parts[1]! }, nowDate());
   track("manual_location.set", { lat: parts[0], lon: parts[1] });
 });
 
@@ -859,6 +938,12 @@ function tick(): void {
     );
   }
 
+  // EKF only drives the camera after a plate-solve lock. We tried turning it
+  // on pre-lock for smoothness, but the device-vs-camera-body frame mismatch
+  // (omega is in device frame; EKF body is camera frame) makes the predict
+  // step drift in the wrong axes — without high-precision plate-solve updates
+  // to clamp it, the rendered sky rotates incorrectly. Pre-lock smoothness
+  // is now handled by a slerp inside renderer.setOrientation instead.
   if (renderer.cameraSource === "ekf" && ekfHasAbsolute) {
     renderer.setCameraQuaternion(ekf.state().q as Quat);
     const yawSigma = ekf.yawSigmaRad() * (180 / Math.PI);
@@ -874,7 +959,23 @@ function tick(): void {
     ? `α ${latestOrientation.a.toFixed(0)}°  β ${latestOrientation.b.toFixed(0)}°  γ ${latestOrientation.g.toFixed(0)}°`
     : "— (grant motion)";
 
-  $utc.textContent = new Date().toISOString().slice(11, 19) + " Z";
+  const effUtc = nowDate();
+  $utc.textContent =
+    effUtc.toISOString().slice(11, 19) +
+    " Z" +
+    (previewClockMs == null ? "" : " ⏰preview");
+  const sunAlt = renderer.sunAltitudeDeg;
+  const dark =
+    sunAlt < -18
+      ? "astronomical dark"
+      : sunAlt < -12
+        ? "astro twilight"
+        : sunAlt < -6
+          ? "nautical"
+          : sunAlt < 0
+            ? "civil"
+            : "DAYLIGHT";
+  $sunAlt.textContent = `${sunAlt.toFixed(1)}° (${dark})`;
 
   const pick = renderer.pickNearestVisibleStar();
   $pick.textContent = pick

@@ -63,6 +63,14 @@ export interface RendererState {
   exposure: number;
   /** Planetary K geomagnetic activity index 0..9. Drives auroral oval extent. */
   kp: number;
+  /**
+   * Realism axis in [0, 1]. 1 = strict naked-eye look (the product default —
+   * what a dark-adapted human actually sees). 0 = long-exposure-camera look
+   * (Milky Way and faint DSOs boosted, fainter stars rendered). Intermediate
+   * values blend linearly. This slider is the *only* place the renderer
+   * tolerates the camera-look mode; everything else stays naked-eye honest.
+   */
+  realism: number;
   /** Stereo / cardboard-headmount rendering options. */
   stereo: StereoState;
 }
@@ -89,6 +97,10 @@ export class SkyRenderer {
   private lastObserver: Observer | null = null;
   /** Sun altitude at the most recent setSky() call (degrees, refraction-uncorrected). */
   private currentSunAltDeg = -90;
+  /** Read-only sun altitude exposed for HUD/telemetry. */
+  get sunAltitudeDeg(): number {
+    return this.currentSunAltDeg;
+  }
   /** Currently active catalog (defaults to the bright fallback; replaced by setCatalog()). */
   private catalog: readonly Star[] = BRIGHT_STARS;
 
@@ -101,6 +113,7 @@ export class SkyRenderer {
     bortle: 4,
     exposure: 1.0,
     kp: 3,
+    realism: 1.0,
     stereo: {
       enabled: false,
       ipdM: 0.064,
@@ -177,10 +190,14 @@ export class SkyRenderer {
         uSunEclipticLon: { value: 0 },
         // Mean obliquity for the equatorial→ecliptic rotation in the shader.
         uObliquityRad: { value: (23.4393 * Math.PI) / 180 },
+        // Realism axis: 1 = naked-eye (MW dim luminous mist), 0 = long-exposure
+        // astrophoto (MW bright + saturated). Multiplier in [1, 8] applied to
+        // both the MW and the zodiacal-light intensity.
+        uRealism: { value: 1 },
       },
       depthWrite: false,
       depthTest: false,
-      side: THREE.BackSide,
+      side: THREE.DoubleSide,
       transparent: true,
       blending: THREE.AdditiveBlending,
       vertexShader: /* glsl */ `
@@ -201,6 +218,7 @@ export class SkyRenderer {
         uniform float uTwilight;
         uniform float uSunEclipticLon;
         uniform float uObliquityRad;
+        uniform float uRealism;
 
         const float PI = 3.141592653589793;
         const float DEG = PI / 180.0;
@@ -244,7 +262,11 @@ export class SkyRenderer {
         float mwDensity(float lDeg, float bDeg) {
           float l = mod(lDeg + 180.0, 360.0) - 180.0;
           float b = bDeg;
-          float sech = 1.0 / cosh(b / 4.0);
+          // sech(x) = 2 / (e^x + e^-x). Inlined because cosh() is GLSL ES 3.0
+          // only — using it in an ES 1.0 shader fails to compile silently on
+          // some mobile GPUs (Android Chrome) and the mesh draws nothing.
+          float ex = exp(b / 4.0);
+          float sech = 2.0 / (ex + 1.0 / ex);
           float disc = sech * sech;
           float lradians = l * DEG;
           float longBulge = 0.55 + 0.45 * cos(lradians);
@@ -274,7 +296,9 @@ export class SkyRenderer {
           float dLambda = mod(lambdaDeg - sunLonDeg + 540.0, 360.0) - 180.0; // (-180, 180]
           float absDL = abs(dLambda);
           // Vertical fall-off off the ecliptic — sech² with scale-height ~ 18°.
-          float sech = 1.0 / cosh(betaDeg / 18.0);
+          // (sech inlined as 2/(e^x+e^-x); see note above on cosh portability.)
+          float ex = exp(betaDeg / 18.0);
+          float sech = 2.0 / (ex + 1.0 / ex);
           float discProf = sech * sech;
           // Longitudinal: bright near sun, falling sharply with elongation.
           float coneCore = 0.5 / max(absDL, 5.0);
@@ -292,9 +316,27 @@ export class SkyRenderer {
 
           float bortleFade = clamp(1.0 - (uBortle - 1.0) / 5.0, 0.0, 1.0);
           float twilightFade = clamp(1.0 - uTwilight * 3.0, 0.0, 1.0);
+          // Realism boost: at uRealism=1 the naked-eye 0.07 coefficient holds;
+          // at uRealism=0 the MW scales to a long-exposure-photo brightness.
+          // Color also picks up the warm dust/Hα tint cameras capture but the
+          // dark-adapted eye is too desensitised to see (red rods absent).
+          float r = clamp(uRealism, 0.0, 1.0);
+          float realismBoost = mix(30.0, 1.0, r);
 
-          float mwIntensity = density * 0.07 * bortleFade * twilightFade;
-          vec3 mwCol = vec3(0.55, 0.6, 0.72) * mwIntensity;
+          float mwIntensity = density * 0.07 * bortleFade * twilightFade * realismBoost;
+          // Punch the densest parts of the band toward white at low realism —
+          // mimics the saturation roll-off of a long-exposure sensor.
+          if (r < 1.0) {
+            mwIntensity = mix(
+              mwIntensity + pow(density, 1.5) * (1.0 - r) * 0.6,
+              mwIntensity,
+              r
+            );
+          }
+          vec3 mwNakedCol = vec3(0.55, 0.60, 0.72);
+          vec3 mwCameraCol = vec3(0.90, 0.62, 0.45);
+          vec3 mwCol = mix(mwCameraCol, mwNakedCol, r) * mwIntensity;
+
 
           // Zodiacal light — only meaningful at very dark sites (Bortle ≤ 3) and
           // in the absence of strong twilight. Same fade gates as the MW.
@@ -312,6 +354,7 @@ export class SkyRenderer {
     const mesh = new THREE.Mesh(geom, mat);
     // Render before everything else (background).
     mesh.renderOrder = -10;
+    mesh.frustumCulled = false;
     this.scene.add(mesh);
     this.milkyWayMesh = mesh;
     this.milkyWayMaterial = mat;
@@ -346,7 +389,7 @@ export class SkyRenderer {
       },
       depthWrite: false,
       depthTest: false,
-      side: THREE.BackSide,
+      side: THREE.DoubleSide,
       transparent: true,
       blending: THREE.AdditiveBlending,
       vertexShader: /* glsl */ `
@@ -402,10 +445,14 @@ export class SkyRenderer {
           }
 
           // -- Light pollution horizon dome (altitude-dependent only) ----------
+          // Smoothstep fade across the horizon line (was a hard cutoff at
+          // altSin=-0.05, which painted a visible diagonal seam under high
+          // Bortle when the camera framed both above- and below-horizon sky).
           float bortleNorm = clamp((uBortle - 1.0) / 8.0, 0.0, 1.0);
-          if (bortleNorm > 0.0 && altSin > -0.05) {
+          if (bortleNorm > 0.0) {
             float horizonProx = pow(1.0 - clamp(altSin, 0.0, 1.0), 3.0);
-            float iLP = bortleNorm * horizonProx * 0.4;
+            float horizonFade = smoothstep(-0.20, 0.05, altSin);
+            float iLP = bortleNorm * horizonProx * horizonFade * 0.4;
             total += vec3(0.55, 0.40, 0.18) * iLP;
           }
 
@@ -466,6 +513,7 @@ export class SkyRenderer {
 
     const mesh = new THREE.Mesh(geom, mat);
     mesh.renderOrder = -9;
+    mesh.frustumCulled = false;
     this.scene.add(mesh);
     this.moonGlowMaterial = mat;
   }
@@ -512,7 +560,12 @@ export class SkyRenderer {
       const [sx, sy, sz] = altAzToVector(sunAa.altDeg, sunAa.azDeg);
       this.moonGlowMaterial.uniforms["uSunDir"]!.value.set(sx, sy, sz);
     }
-    const limitMag = effectiveLimitMag(this.state.bortle, sunAltDeg);
+    // Realism axis pushes the limiting magnitude deeper at low realism — the
+    // catalog floor is ~6.5 so the practical gain is capped, but more stars
+    // pop into view across the slider's lower half.
+    const realismDepth = (1 - Math.max(0, Math.min(1, this.state.realism))) * 4;
+    const limitMag =
+      effectiveLimitMag(this.state.bortle, sunAltDeg) + realismDepth;
     // Avoid a vestigial reference to the imported bortleLimitMag (kept for callers).
     void bortleLimitMag;
 
@@ -895,11 +948,7 @@ export class SkyRenderer {
    * these are eye-visible; under a dark sky M31 is an obvious oval and M42 is
    * a noticeable fuzzy reddish star to the unaided eye.
    */
-  private updateDSO(
-    observer: Observer,
-    date: Date,
-    sunAltDeg: number,
-  ): void {
+  private updateDSO(observer: Observer, date: Date, sunAltDeg: number): void {
     if (this.dsoGroup) {
       this.scene.remove(this.dsoGroup);
       this.dsoGroup.traverse((obj) => {
@@ -916,12 +965,20 @@ export class SkyRenderer {
     // Per-Bortle naked-eye DSO limit. At Bortle 1 a dark-adapted observer can
     // see Veil and M81 fuzz; by Bortle 5 only the showpieces (M31, M45, M44)
     // remain; in city sky (Bortle 7+) only M45 is anything more than a star.
-    const limitForDSO =
-      this.state.bortle <= 1 ? 9.0 :
-      this.state.bortle <= 2 ? 7.0 :
-      this.state.bortle <= 4 ? 6.0 :
-      this.state.bortle <= 6 ? 4.0 :
-      2.0;
+    const limitForDSObase =
+      this.state.bortle <= 1
+        ? 9.0
+        : this.state.bortle <= 2
+          ? 7.0
+          : this.state.bortle <= 4
+            ? 6.0
+            : this.state.bortle <= 6
+              ? 4.0
+              : 2.0;
+    // Realism axis pushes the DSO mag floor deeper — at realism=0 every
+    // cataloged DSO is visible, mimicking long-exposure capture.
+    const realismDSO = (1 - Math.max(0, Math.min(1, this.state.realism))) * 4;
+    const limitForDSO = limitForDSObase + realismDSO;
 
     const group = new THREE.Group();
     for (const dso of NAKED_EYE_DSO) {
@@ -935,7 +992,8 @@ export class SkyRenderer {
       // by 1/area to roughly model surface-brightness perception (the eye sees
       // surface brightness, not integrated mag, for extended objects).
       const areaDeg2 = Math.PI * (dso.majorDeg / 2) * (dso.minorDeg / 2);
-      const surfaceMag = apparentMag + 2.5 * Math.log10(Math.max(0.5, areaDeg2));
+      const surfaceMag =
+        apparentMag + 2.5 * Math.log10(Math.max(0.5, areaDeg2));
       const flux = magToFlux(surfaceMag) * this.state.exposure * 8.0; // x8 lift makes them visible at all
 
       const mesh = this.buildDSOPatch(dso, flux);
@@ -971,7 +1029,9 @@ export class SkyRenderer {
       blending: THREE.AdditiveBlending,
       uniforms: {
         uFlux: { value: flux },
-        uColor: { value: new THREE.Color(dso.color[0], dso.color[1], dso.color[2]) },
+        uColor: {
+          value: new THREE.Color(dso.color[0], dso.color[1], dso.color[2]),
+        },
         uSharp: { value: profileSharp },
       },
       vertexShader: /* glsl */ `
@@ -1094,9 +1154,10 @@ export class SkyRenderer {
     const nowMs = date.getTime();
 
     // Sample new meteors based on time since last sample, capped at 1s of dt.
-    const dt = this.lastMeteorSampleMs > 0
-      ? Math.min(1.0, (nowMs - this.lastMeteorSampleMs) / 1000)
-      : 0.1;
+    const dt =
+      this.lastMeteorSampleMs > 0
+        ? Math.min(1.0, (nowMs - this.lastMeteorSampleMs) / 1000)
+        : 0.1;
     this.lastMeteorSampleMs = nowMs;
 
     // Skip when sun is up — meteors aren't naked-eye visible in daylight.
@@ -1106,8 +1167,12 @@ export class SkyRenderer {
       const specs = sampleNewMeteors(date, dt, observer);
       for (const spec of specs) {
         // Magnitude clamp: refuse to render meteors fainter than the Bortle limit + small slack.
-        const apparentMag = spec.mag + extinctionMag(Math.max(0, spec.startAlt));
-        const limit = effectiveLimitMag(this.state.bortle, this.currentSunAltDeg);
+        const apparentMag =
+          spec.mag + extinctionMag(Math.max(0, spec.startAlt));
+        const limit = effectiveLimitMag(
+          this.state.bortle,
+          this.currentSunAltDeg,
+        );
         if (apparentMag > limit + 0.5) continue;
         const mesh = this.buildMeteorMesh(spec);
         if (mesh) {
@@ -1261,6 +1326,7 @@ export class SkyRenderer {
     // Sun's ecliptic longitude drives the zodiacal cone direction.
     this.milkyWayMaterial.uniforms["uSunEclipticLon"]!.value =
       sunPosition(date).lambdaDeg;
+    this.milkyWayMaterial.uniforms["uRealism"]!.value = this.state.realism;
   }
 
   /** Place the moon on the sky sphere with the current phase / illumination. */
@@ -1551,6 +1617,21 @@ export class SkyRenderer {
    */
   cameraSource: "sensor" | "ekf" = "sensor";
 
+  /**
+   * One-pole slerp smoothing applied to the camera quaternion in 'sensor'
+   * mode. DeviceOrientation arrives at ~30Hz with ±1–3° magnetometer noise;
+   * the render loop is 60Hz. Without smoothing, the noise rides directly onto
+   * the screen and high-frequency tremble drowns out the actual motion.
+   *
+   * α = 1 (legacy, no smoothing) → snap to every reading.
+   * α ≈ 0.45 (default) → time constant ~25ms — eats most tremble while
+   * keeping the lag close to the display's own latency floor.
+   * α → 0 → maximum smoothing, very laggy.
+   */
+  sensorSlerpAlpha = 0.45;
+  /** True until the very first setOrientation call so we snap, not slerp, in. */
+  private sensorPrimed = false;
+
   setOrientation(alphaDeg: number, betaDeg: number, gammaDeg: number): void {
     const alpha = (alphaDeg + this.state.headingOffsetDeg) * DEG;
     const beta = betaDeg * DEG;
@@ -1580,12 +1661,15 @@ export class SkyRenderer {
     // EKF can still receive DeviceOrientation as a noisy absolute measurement.
     if (this.cameraSource === "ekf") return;
 
-    if (this.hasLock) {
-      // q_camera = qLock · qDevice
-      const out = this.qLock.clone().multiply(q);
-      this.camera.quaternion.copy(out);
+    const target = this.hasLock ? this.qLock.clone().multiply(q) : q;
+    // First frame: snap rather than slerp from the identity (which would
+    // produce a 1-second-ish sweep from looking-along-+Z to actual heading).
+    if (!this.sensorPrimed) {
+      this.camera.quaternion.copy(target);
+      this.sensorPrimed = true;
     } else {
-      this.camera.quaternion.copy(q);
+      const a = Math.max(0, Math.min(1, this.sensorSlerpAlpha));
+      this.camera.quaternion.slerp(target, a);
     }
   }
 

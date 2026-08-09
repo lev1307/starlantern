@@ -108,15 +108,21 @@ export class SensorHub {
       };
       for (const l of this.listeners) l(this.orientation);
     };
-    // Try the absolute (compass-referenced) event first; fall back to relative.
-    if ("ondeviceorientationabsolute" in window) {
+    // Use the absolute (compass-referenced) event if available; otherwise fall
+    // back to relative. Subscribing to both simultaneously interleaves frames
+    // — absolute emits true-north α, relative emits a device-startup α — and
+    // the handler thrashes between them at ~60Hz, producing visible heading
+    // flicker. Pick one stream and stick with it.
+    const hasAbsolute = "ondeviceorientationabsolute" in window;
+    if (hasAbsolute) {
       window.addEventListener(
         "deviceorientationabsolute",
         this.bound as EventListener,
       );
       this.absoluteListenerActive = true;
+    } else {
+      window.addEventListener("deviceorientation", this.bound);
     }
-    window.addEventListener("deviceorientation", this.bound);
   }
 
   onOrientation(cb: OrientationListener): () => void {
@@ -240,12 +246,13 @@ export class SensorHub {
 
   dispose(): void {
     if (this.bound) {
-      window.removeEventListener("deviceorientation", this.bound);
       if (this.absoluteListenerActive) {
         window.removeEventListener(
           "deviceorientationabsolute",
           this.bound as EventListener,
         );
+      } else {
+        window.removeEventListener("deviceorientation", this.bound);
       }
       this.bound = null;
     }
